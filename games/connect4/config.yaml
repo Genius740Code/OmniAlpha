@@ -1,0 +1,4 @@
+# Per-game overrides merged over configs/*.yaml by python/gai/orchestrator.py (TODO: implement merge).
+game: connect4
+network: {type: resnet, channels: 64, blocks: 4}
+search: {min_simulations: 100, target_simulations: 800, max_simulations: 4000}

@@ -1,0 +1,11 @@
+# 10-min Connect4 v2: KataGo-lite fixes ON, NN-guided selfplay via build-lt (CPU libtorch).
+budget_minutes: 10
+checkpoint: {interval_minutes: 1}
+selfplay: {games_per_iter: 24, simulations: 150, evaluator: rollout, threads: 2, temperature_moves: 10, dirichlet: 0.3, full_prob: 0.25, gumbel_root: 1, gumbel_epsilon: 0.1, cheap_frac: 0.15, forced: 1, prune: 1, shortcuts: 1, augment: true}
+network: {type: mlp, hidden: 128, layers: 2}
+training: {lr: 0.001, weight_decay: 0.0001, batch_size: 256, steps_per_iter: 30, replay_capacity: 200000, mixed_precision: false}
+race: {enabled: false, fraction_of_budget: 0.15, candidates: [{type: mlp, hidden: 128, layers: 2}]}
+eval: {games: 20, sims: 100, promote_if_elo_gain_over: 0, min_confidence_games: 50}
+clock: {minimum_think_ms: 0, maximum_think_ms: 30000, safety_margin_ms: 100, emergency_ms: 1000}
+search: {min_simulations: 150, target_simulations: 150, max_simulations: 150}
+logging: {dir: logs, format: jsonl}

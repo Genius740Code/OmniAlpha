@@ -1,0 +1,11 @@
+# Long-term mode: runs until stopped. Same schema as competition_60m.yaml plus continuous-promotion settings.
+budget_minutes: .inf
+checkpoint: {interval_minutes: 30}
+selfplay: {games_per_iter: 256, simulations: 400, evaluator: rollout, threads: auto, temperature_moves: 15, dirichlet: 0.3}
+network: {type: resnet, channels: 128, blocks: 8}
+training: {lr: 0.0005, weight_decay: 0.0001, batch_size: 512, steps_per_iter: 200, replay_capacity: 2000000, mixed_precision: true}
+champion: {eval_games: 200, promote_if_score_above: 0.55, keep_last_n_checkpoints: 20}
+experiments: {enabled: false, ideas: [network_size, c_puct, simulations, replay_window, lr_schedule, gumbel_search]}
+clock: {minimum_think_ms: 0, maximum_think_ms: 30000, safety_margin_ms: 100, emergency_ms: 1000}
+search: {min_simulations: 200, target_simulations: 2000, max_simulations: 20000}
+logging: {dir: logs, format: jsonl}

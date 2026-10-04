@@ -1,0 +1,30 @@
+# Build output
+build/
+build-*/
+cmake-build-*/
+
+# Compiled objects / binaries
+*.o
+*.so
+*.a
+
+# Selfplay data + checkpoints + logs (large, machine-generated)
+*.bin
+*.pt
+*.ts
+models/*.pt
+models/*.ts
+logs/
+*.jsonl
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+.DS_Store

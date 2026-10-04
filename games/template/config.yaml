@@ -1,0 +1,4 @@
+# Per-game overrides merged over configs/*.yaml by python/gai/orchestrator.py (TODO: implement merge).
+game: template
+network: {type: mlp, hidden: 64, layers: 2}
+search: {min_simulations: 50, target_simulations: 200, max_simulations: 1000}
