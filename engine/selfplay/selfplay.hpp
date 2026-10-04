@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <mutex>
 #include <vector>
+#include "engine/mcts/gumbel_root.hpp"
 #include "engine/mcts/mcts.hpp"
 
 namespace gai {
@@ -91,15 +92,38 @@ GameRecord<G> play_selfplay_game(const SelfPlayConfig& cfg, Evaluator<G>& ev, Rn
     }
     int have = mcts.root_expanded() ? mcts.total_visits() : 0;
     if (!mcts.root_expanded()) mcts.run(1, ev, 1);
-    mcts.add_root_noise(rng);
-    mcts.run(std::max(0, sims - have), ev, cfg.batch);
-    // Proven root win: stop searching this position (already solved).
     Sample<G> sm; sm.input.resize(input_size<G>()); sm.policy.resize(G::kActionCount); sm.player = G::current_player(s);
     sm.full_search = full ? 1.f : 0.f;
     G::encode(s, sm.input.data());
-    if (cfg.policy_pruning) mcts.improved_policy(sm.policy.data());
-    else mcts.visit_policy(sm.policy.data());
-    Move m = mcts.sample_move(rec.plies < cfg.temperature_moves ? cfg.temperature : 0.f, rng);
+    Move m = -1;
+    if (cfg.mcts.gumbel && full) {
+      // Real Gumbel root: replaces Dirichlet noise, forced playouts and
+      // temperature exploration. Target is the improved policy (guaranteed
+      // improvement even at few sims); every move uses the small budget.
+      auto gr = run_gumbel_root(mcts, ev, cfg.mcts, rng, cfg.batch);
+      sm.policy = gr.improved;
+      float temp = rec.plies < cfg.temperature_moves ? cfg.temperature : 0.f;
+      if (temp <= 1e-3f || gr.best < 0) m = gr.best;
+      if (m < 0) {
+        Move mv[G::kMaxMoves];
+        int n = G::legal_moves(s, mv);
+        double sum = 0;
+        for (int i = 0; i < n; i++) sum += std::pow((double)std::max(sm.policy[mv[i]], 0.f), 1.0 / temp);
+        double r = rng.uniform() * sum;
+        m = mv[n - 1];
+        for (int i = 0; i < n; i++) {
+          r -= std::pow((double)std::max(sm.policy[mv[i]], 0.f), 1.0 / temp);
+          if (r <= 0) { m = mv[i]; break; }
+        }
+      }
+    } else {
+      mcts.add_root_noise(rng);
+      mcts.run(std::max(0, sims - have), ev, cfg.batch);
+      // Proven root win: stop searching this position (already solved).
+      if (cfg.policy_pruning) mcts.improved_policy(sm.policy.data());
+      else mcts.visit_policy(sm.policy.data());
+      m = mcts.sample_move(rec.plies < cfg.temperature_moves ? cfg.temperature : 0.f, rng);
+    }
     rec.samples.push_back(std::move(sm));
     G::apply(s, m); rec.plies++;
     if (cfg.reuse_tree) mcts.advance_root(m); else mcts.set_root(s);

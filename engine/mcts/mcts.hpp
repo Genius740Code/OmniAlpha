@@ -19,9 +19,12 @@ struct MctsConfig {
   size_t max_nodes = 4'000'000;    // compact() on advance_root when exceeded
   bool forced_playouts = false;    // KataGo-style: guarantee min visits per root child
   float forced_k = 2.0f;            // n_forced(c) = sqrt(k * prior(c) * total_root_visits)
-  // Gumbel root + Sequential Halving (Danihelka et al. ICLR 2022)
-  bool gumbel_root = false;         // use Gumbel-Top-k + Sequential Halving at root
-  float gumbel_eps = 0.1f;          // temperature/entropy parameter for Gumbel sampling
+  // Real Gumbel root + Sequential Halving (Danihelka et al. ICLR 2022), see gumbel_root.hpp.
+  // Driven explicitly via run_gumbel_root(); the old prior-noise approximation was A/B killed.
+  bool gumbel = false;              // selfplay uses run_gumbel_root for full-budget searches
+  int gumbel_sims = 32;             // root simulation budget for Gumbel search
+  float gumbel_c_visit = 50.f;      // sigma transform: (c_visit + maxN) * c_scale * q01
+  float gumbel_c_scale = 1.f;
 };
 
 template <GameLike G> class MCTS {
@@ -39,7 +42,7 @@ template <GameLike G> class MCTS {
   explicit MCTS(MctsConfig c = {}) : cfg_(c) {}
 
   void set_root(const State& s) {
-    nodes_.clear(); nodes_.emplace_back(); root_ = 0; root_state_ = s;
+    nodes_.clear(); nodes_.emplace_back(); root_ = 0; root_state_ = s; forced_root_ = -1;
   }
   const State& root_state() const { return root_state_; }
 
@@ -48,9 +51,14 @@ template <GameLike G> class MCTS {
     int c = find_child(root_, m);
     G::apply(root_state_, m);
     if (c < 0) { set_root(root_state_); return; }
-    root_ = c; nodes_[c].parent = -1;
+    root_ = c; nodes_[c].parent = -1; forced_root_ = -1;
     if (nodes_.size() > cfg_.max_nodes) compact();
   }
+
+  // Root-forcing hook for Sequential Halving: while set, root selection descends
+  // into the given root-child index regardless of PUCT. -1 disables.
+  void set_forced_root(int idx) { forced_root_ = idx; }
+  void clear_forced_root() { forced_root_ = -1; }
 
   // --- split simulation API --------------------------------------------------------
   Leaf select_leaf() {
@@ -99,26 +107,6 @@ template <GameLike G> class MCTS {
   bool root_expanded() const { return nodes_[root_].first_child >= 0; }
   void add_root_noise(Rng& rng) {
     if (cfg_.dirichlet_alpha <= 0 || !root_expanded()) return;
-    // Gumbel root: replace Dirichlet noise with Gumbel-Top-k at root
-    if (cfg_.gumbel_root && root_expanded()) {
-      Node& r = nodes_[root_]; int m = r.nchild;
-      // Sample Gumbel noise and perturb priors
-      std::vector<float> g(m);
-      for (int i = 0; i < m; i++) {
-        float u = rng.uniform();  // uniform [0,1)
-        g[i] = -std::log(-std::log(u + 1e-7f) + 1e-7f);  // Gumbel(0,1) sample
-      }
-      // Perturb priors: new_prior = (1-eps) * old_prior + eps * g_normalized
-      float sum_g = 0;
-      for (int i = 0; i < m; i++) sum_g += std::exp(g[i]);
-      for (int i = 0; i < m; i++) {
-        int ci = r.first_child + i;
-        float old_prior = nodes_[ci].prior;
-        float new_prior = (1 - cfg_.gumbel_eps) * old_prior + cfg_.gumbel_eps * (std::exp(g[i]) / sum_g);
-        nodes_[ci].prior = new_prior;
-      }
-      // Fall through to normal dirichlet_eps handling below
-    }
     Node& r = nodes_[root_]; std::vector<float> d(r.nchild); float sum = 0;
     std::gamma_distribution<float> g(cfg_.dirichlet_alpha, 1.0f);
     for (auto& x : d) { x = g(rng); sum += x; }
@@ -132,6 +120,7 @@ template <GameLike G> class MCTS {
   int num_root_children() const { return nodes_[root_].nchild; }
   Move child_move(int i) const { return nodes_[nodes_[root_].first_child + i].move; }
   int child_visits(int i) const { return nodes_[nodes_[root_].first_child + i].n; }
+  float child_prior(int i) const { return nodes_[nodes_[root_].first_child + i].prior; }
   float child_q(int i) const { const Node& c = nodes_[nodes_[root_].first_child + i]; return c.n ? c.w / c.n : 0.f; }
   void visit_policy(float* out) const {
     for (int a = 0; a < G::kActionCount; a++) out[a] = 0;
@@ -220,6 +209,8 @@ template <GameLike G> class MCTS {
   }
   int pick_child(int cur, const State& s) const {
     const Node& p = nodes_[cur]; int chooser = G::current_player(s);
+    if (cur == root_ && forced_root_ >= 0 && forced_root_ < p.nchild)
+      return p.first_child + forced_root_;
     // Forced playouts at root: PUCT = infinity while child visits < sqrt(k*prior*total).
     if (cfg_.forced_playouts && cur == root_ && p.nchild > 0) {
       float total = (float)std::max(1, p.n);
@@ -315,6 +306,6 @@ template <GameLike G> class MCTS {
     }
     nodes_.swap(out); root_ = 0;
   }
-  MctsConfig cfg_; std::vector<Node> nodes_; int root_ = 0; State root_state_{};
+  MctsConfig cfg_; std::vector<Node> nodes_; int root_ = 0; State root_state_{}; int forced_root_ = -1;
 };
 }  // namespace gai

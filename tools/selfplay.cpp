@@ -20,8 +20,8 @@ template <class T> int run(const Args& a) {
   cfg.full_search_prob = (float)a.dbl("full-prob", 1.0);
   cfg.cheap_sim_fraction = (float)a.dbl("cheap-frac", 0.125);
   cfg.cheap_min_sims = (int)a.num("cheap-min", 10);
-  cfg.mcts.gumbel_root = (int)a.num("gumbel-root", 0);
-  cfg.mcts.gumbel_eps = (float)a.dbl("gumbel-eps", 0.1);
+  cfg.mcts.gumbel = (int)a.num("gumbel", 0) != 0;
+  cfg.mcts.gumbel_sims = (int)a.num("gumbel-sims", 32);
   std::string ev_spec = a.str("evaluator", "rollout"); uint64_t seed = (uint64_t)a.num("seed", 1);
   SampleWriter<G> writer(a.str("out", "selfplay.bin").c_str());
   if (!writer.ok()) { std::fprintf(stderr, "cannot open output\n"); return 1; }

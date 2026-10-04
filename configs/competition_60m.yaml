@@ -1,7 +1,7 @@
 # 60-minute competition mode. Schema is the contract for python/gai/orchestrator.py (extend, don't rename).
 budget_minutes: 60
 checkpoint: {interval_minutes: 10}        # -> models/checkpoint_10m.pt, 20m, ... ; champion.pt chosen by arena (TODO)
-selfplay: {games_per_iter: 64, simulations: 200, evaluator: rollout, threads: auto, temperature_moves: 10, dirichlet: 0.3, gumbel_root: 0, gumbel_epsilon: 0.1}
+selfplay: {games_per_iter: 64, simulations: 200, evaluator: rollout, threads: auto, temperature_moves: 10, dirichlet: 0.3, gumbel: 0, gumbel_sims: 32}
 network: {type: resnet, channels: 64, blocks: 4}   # per-game games/<g>/config.yaml overrides (merge TODO)
 training: {lr: 0.001, weight_decay: 0.0001, batch_size: 256, steps_per_iter: 50, replay_capacity: 200000, mixed_precision: true}
 race:                                       # configuration racing (TODO): candidates tried early, losers eliminated
