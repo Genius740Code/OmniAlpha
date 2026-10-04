@@ -1,9 +1,10 @@
 // Self-play game generation + binary sample file format (read by python/gai/data.py).
-// File: magic "GAIS", then u32 x5: version(3), planes, height, width, action_count; then records of
+// File: magic "GAIS", then u32 x5: version(4), planes, height, width, action_count; then records of
 //   float input[planes*h*w]  (encode() of the state, view of player to move)
 //   float policy[action_count] (MCTS visit distribution; one-hot for tactical shortcuts)
 //   float value               (final outcome from the view of the player to move, +1/0/-1)
 //   float full                (1 = full-budget search, policy target valid; 0 = cheap/shortcut, value-only)
+//   float q                   (search root_value at move time, player-to-move view; for outcome mixing)
 #pragma once
 #include <cstdio>
 #include <mutex>
@@ -23,11 +24,13 @@ struct SelfPlayConfig {
   float full_search_prob = 1.0f;  // playout-cap randomization: P(full sims); else cheap
   float cheap_sim_fraction = 0.125f;
   int cheap_min_sims = 10;
+  float value_lambda = 0.5f;      // soft-Z: blend outcome with search Q [0,1]
   MctsConfig mcts;
 };
 
 template <GameLike G> struct Sample {
   std::vector<float> input, policy; int player; float value = 0; float full_search = 1.f;
+  float q = 0.f;  // search value (root_value) at move time, player-to-move view; for mixing
 };
 template <GameLike G> struct GameRecord { std::vector<Sample<G>> samples; float outcome_p0 = 0; int plies = 0; };
 
@@ -74,10 +77,11 @@ GameRecord<G> play_selfplay_game(const SelfPlayConfig& cfg, Evaluator<G>& ev, Rn
       mcts.set_root(s);
       continue;  // forced move teaches nothing about preference: emit no sample
     }
-    Move sc = -1;
-    if (cfg.enable_shortcuts && (find_win_in_1<G>(s, &sc) || find_block_in_1<G>(s, &sc))) {
+    Move sc = -1; bool is_win = false;
+    if (cfg.enable_shortcuts && ((is_win = find_win_in_1<G>(s, &sc)) || find_block_in_1<G>(s, &sc))) {
       Sample<G> sm; sm.input.resize(input_size<G>()); sm.policy.resize(G::kActionCount, 0.f);
       sm.player = G::current_player(s); sm.full_search = 0.f;
+      sm.q = is_win ? 1.f : 0.f;  // win-in-1 is certain; block is neutral prior
       G::encode(s, sm.input.data());
       if (sc >= 0 && sc < G::kActionCount) sm.policy[sc] = 1.f;
       rec.samples.push_back(std::move(sm));
@@ -129,7 +133,12 @@ GameRecord<G> play_selfplay_game(const SelfPlayConfig& cfg, Evaluator<G>& ev, Rn
     if (cfg.reuse_tree) mcts.advance_root(m); else mcts.set_root(s);
   }
   rec.outcome_p0 = G::outcome(s, 0);
-  for (auto& sm : rec.samples) sm.value = G::outcome(s, sm.player);
+  float final_value = G::outcome(s, 0);
+  for (auto& sm : rec.samples) {
+    // soft-Z style: blend game outcome with search root-value Q.
+    // outcome is +1/0/-1 from player-to-move view; q is the MCTS root_value at move time.
+    sm.value = (1.f - cfg.value_lambda) * final_value + cfg.value_lambda * sm.q;
+  }
   return rec;
 }
 
@@ -137,14 +146,14 @@ template <GameLike G> class SampleWriter {
  public:
   explicit SampleWriter(const char* path) {
     f_ = std::fopen(path, "wb"); if (!f_) return;
-    uint32_t h[5] = {3u, (uint32_t)G::kInputPlanes, (uint32_t)G::kInputH, (uint32_t)G::kInputW, (uint32_t)G::kActionCount};
+    uint32_t h[5] = {4u, (uint32_t)G::kInputPlanes, (uint32_t)G::kInputH, (uint32_t)G::kInputW, (uint32_t)G::kActionCount};
     std::fwrite("GAIS", 1, 4, f_); std::fwrite(h, 4, 5, f_);
   }
   ~SampleWriter() { if (f_) std::fclose(f_); }
   bool ok() const { return f_ != nullptr; }
   void write(const GameRecord<G>& r) {
     std::lock_guard<std::mutex> g(mu_);
-    for (auto& s : r.samples) { std::fwrite(s.input.data(), 4, s.input.size(), f_); std::fwrite(s.policy.data(), 4, s.policy.size(), f_); std::fwrite(&s.value, 4, 1, f_); std::fwrite(&s.full_search, 4, 1, f_); }
+    for (auto& s : r.samples) { std::fwrite(s.input.data(), 4, s.input.size(), f_); std::fwrite(s.policy.data(), 4, s.policy.size(), f_); std::fwrite(&s.value, 4, 1, f_); std::fwrite(&s.full_search, 4, 1, f_); std::fwrite(&s.q, 4, 1, f_); }
     positions_ += r.samples.size();
   }
   size_t positions() const { return positions_; }
