@@ -37,14 +37,21 @@ def main():
         data = os.path.join(a.out, "selfplay_tmp.bin"); sp = cfg["selfplay"]
         latest_ts = os.path.join(a.out, "latest.ts")
         ev = sp.get("evaluator", "rollout")
-        # Gated evaluator switch: for iters below nn_start_iter, always use rollout
-        # evaluator even if latest.ts exists, because early nets are worse than rollout
-        # and can poison data with memorization/overfitting
-        nn_start_iters = cfg.get("selfplay", {}).get("nn_start_iter", 5)
-        if it < nn_start_iters:
+        # Gated + annealed evaluator switch: below nn_start_iter always rollout
+        # (early nets are worse than rollout and poison data); then ramp
+        # hybrid alpha 0 -> 1 over nn_anneal_iters; alpha=1 == pure NN.
+        nn_start = sp.get("nn_start_iter", 5)
+        nn_anneal = max(1, sp.get("nn_anneal_iters", 40))
+        alpha = 0.0
+        if it < nn_start:
             ev = "rollout"
         elif nn_ok and os.path.exists(latest_ts) and it > 0:
-            ev = f"nn:{latest_ts}"
+            if sp.get("hybrid", 0):
+                alpha = min(1.0, (it - nn_start + 1) / nn_anneal)
+                ev = f"hybrid:{latest_ts}:{alpha:.3f}"
+            else:
+                alpha = 1.0
+                ev = f"nn:{latest_ts}"
         # playout-cap randomization flags come from config when present
         cmd = [f"{a.build}/selfplay", "--game", a.game, "--games", str(sp["games_per_iter"]), "--sims", str(sp["simulations"]),
                "--out", data, "--evaluator", ev, "--seed", str(it + 1),
@@ -55,7 +62,7 @@ def main():
         try:
             stats = sh_json(cmd)
         except RuntimeError as e:
-            if ev.startswith("nn:"):  # fall back to CPU evaluator
+            if ev.startswith("nn:") or ev.startswith("hybrid:"):  # fall back to CPU evaluator
                 nn_ok = False
                 print(f"nn evaluator failed, falling back: {e}")
                 ev = sp.get("evaluator", "rollout")
@@ -113,7 +120,7 @@ def main():
                                 effective_steps=effective_steps,
                                 max_reuse_ratio=max_reuse_ratio,
                                 fresh_positions=fresh_positions,
-                                evaluator=ev,
+                                evaluator=ev, alpha=round(alpha, 3),
                                 **losses)) + "\n")
         log.flush(); it += 1
         save_checkpoint(net, os.path.join(a.out, "latest.pt"))

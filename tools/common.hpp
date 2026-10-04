@@ -10,6 +10,7 @@
 #include "engine/time_manager/time_manager.hpp"
 
 #ifdef GAI_LIBTORCH
+#include "engine/inference/hybrid.hpp"
 #include "engine/inference/nn_evaluator.hpp"
 #endif
 
@@ -52,6 +53,20 @@ template <gai::GameLike G> std::unique_ptr<gai::Evaluator<G>> make_evaluator(con
   if (spec.rfind("nn:", 0) == 0) {
     std::string path = spec.substr(3);
     return std::make_unique<gai::NNEvaluator<G>>(path);
+  }
+  if (spec.rfind("hybrid:", 0) == 0) {
+    // hybrid:<path>:<alpha>[:<rollouts>]  alpha in [0,1]
+    std::string rest = spec.substr(7);
+    auto c1 = rest.find(':');
+    std::string path = c1 == std::string::npos ? rest : rest.substr(0, c1);
+    float alpha = 1.f; int rolls = 1;
+    if (c1 != std::string::npos) {
+      std::string rest2 = rest.substr(c1 + 1);
+      auto c2 = rest2.find(':');
+      alpha = std::atof((c2 == std::string::npos ? rest2 : rest2.substr(0, c2)).c_str());
+      if (c2 != std::string::npos) rolls = std::max(1, std::atoi(rest2.substr(c2 + 1).c_str()));
+    }
+    return std::make_unique<gai::HybridEvaluator<G>>(path, alpha, rolls, seed);
   }
 #endif
   std::fprintf(stderr, "evaluator '%s' not supported yet (NN evaluator is TODO, see docs/HANDOFF.md)\n", spec.c_str());
