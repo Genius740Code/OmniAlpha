@@ -204,6 +204,20 @@ template <GameLike G> class MCTS {
     for (int i = 0; i < n.nchild; i++) if (nodes_[n.first_child + i].move == m) return n.first_child + i;
     return -1;
   }
+  float fpu_for(int cur, int chooser) const {
+    // Root FPU: no absolute penalty (KataGo uses reduction 0 at root with noise on).
+    // Use the root value estimate (mean child Q from the chooser's view), 0 when unvisited.
+    // Non-root FPU stays parent Q minus reduction.
+    const Node& p = nodes_[cur];
+    if (cur == root_) {
+      float w = 0; int n = 0;
+      for (int i = 0; i < p.nchild; i++) { const Node& c = nodes_[p.first_child + i]; w += c.w; n += c.n; }
+      return n ? w / n : 0.f;
+    }
+    float parent_q = 0;
+    if (p.n > 0) parent_q = (p.mover == chooser ? 1.f : -1.f) * p.w / p.n;
+    return parent_q - cfg_.fpu_reduction;
+  }
   int pick_child(int cur, const State& s) const {
     const Node& p = nodes_[cur]; int chooser = G::current_player(s);
     // Forced playouts at root: PUCT = infinity while child visits < sqrt(k*prior*total).
@@ -229,9 +243,7 @@ template <GameLike G> class MCTS {
       if (nonloss >= 0 && nloss > 0) {
         // Exclude proven losses from PUCT consideration below by restricting to non-loss.
         // Fall through to PUCT but skip proven-loss children.
-        float parent_q = 0;
-        if (cur != root_ && p.n > 0) parent_q = (p.mover == chooser ? 1.f : -1.f) * p.w / p.n;
-        float fpu = parent_q - cfg_.fpu_reduction;
+        float fpu = fpu_for(cur, chooser);
         float sq = std::sqrt((float)std::max(1, p.n + p.vl - 1));
         int best = nonloss; float bs = -1e30f;
         for (int i = 0; i < p.nchild; i++) {
@@ -245,9 +257,7 @@ template <GameLike G> class MCTS {
         return best;
       }
     }
-    float parent_q = 0;
-    if (cur != root_ && p.n > 0) parent_q = (p.mover == chooser ? 1.f : -1.f) * p.w / p.n;
-    float fpu = parent_q - cfg_.fpu_reduction;
+    float fpu = fpu_for(cur, chooser);
     float sq = std::sqrt((float)std::max(1, p.n + p.vl - 1));
     int best = -1; float bs = -1e30f;
     for (int i = 0; i < p.nchild; i++) {

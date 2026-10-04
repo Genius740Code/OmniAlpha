@@ -69,7 +69,7 @@ string(APPEND _list "\n")
 file(GENERATE OUTPUT ${CMAKE_BINARY_DIR}/generated/games.inc CONTENT "${_inc}${_list}")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_dirs})
 
-foreach(t validate_game benchmark_game selfplay evaluate play)
+foreach(t validate_game benchmark_game selfplay evaluate play scaling)
   add_executable(${t} tools/${t}.cpp)
   target_link_libraries(${t} PRIVATE gai_engine)
 endforeach()

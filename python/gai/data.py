@@ -33,6 +33,19 @@ def maybe_mirror_batch(x, pi, z, full, prob=0.5, rng=np.random):
     return (np.concatenate([x, xf]), np.concatenate([pi, pif]),
             np.concatenate([z, z[m]]), np.concatenate([full, full[m]]))
 
+def split_held_out(x, pi, z, full, holdout_frac=0.1):
+    """Split off the last holdout_frac of the batch as held-out data.
+    The held-out portion is NEVER added to ReplayBuffer.
+    Returns (train_x, train_pi, train_z, train_full, heldout_x, heldout_pi, heldout_z, heldout_full).
+    """
+    n = len(z)
+    holdout_size = int(n * holdout_frac)
+    if holdout_size <= 0 or holdout_size >= n:
+        return x, pi, z, full, np.empty((0, *x.shape[1:])), np.empty((0, *pi.shape[1:])), np.empty((0,)), np.ones((0,), np.float32)
+    train_end = n - holdout_size
+    return (x[:train_end], pi[:train_end], z[:train_end], full[:train_end],
+            x[train_end:], pi[train_end:], z[train_end:], full[train_end:])
+
 class ReplayBuffer:
     """Fixed-capacity in-memory ring buffer (competition mode keeps everything in RAM)."""
     def __init__(self, capacity, planes, h, w, actions):

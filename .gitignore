@@ -15,12 +15,13 @@ cmake-build-*/
 models/*.pt
 models/*.ts
 logs/
+results/
 *.jsonl
 
 # Python
 __pycache__/
 *.pyc
-.venv/
+*.venv/
 *.egg-info/
 
 # Editors / OS

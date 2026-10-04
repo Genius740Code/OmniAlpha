@@ -2,8 +2,9 @@
 Selfplay (C++ binary) -> replay buffer -> train -> timed checkpoints -> TorchScript export.
 Arena vs champion when possible; otherwise promotes latest. Tracks Elo vs wall-clock in log.jsonl.
 Usage: python -m gai.orchestrator --config configs/competition_60m.yaml --game connect4 [--minutes 2]"""
-import argparse, json, os, subprocess, time, yaml
-from .data import read_samples, ReplayBuffer
+import argparse, json, os, subprocess, time, yaml, torch
+import torch.nn.functional as F
+from .data import read_samples, ReplayBuffer, split_held_out
 
 def run_cmd(cmd):
     p = subprocess.run(cmd, capture_output=True, text=True)
@@ -36,7 +37,13 @@ def main():
         data = os.path.join(a.out, "selfplay_tmp.bin"); sp = cfg["selfplay"]
         latest_ts = os.path.join(a.out, "latest.ts")
         ev = sp.get("evaluator", "rollout")
-        if nn_ok and os.path.exists(latest_ts) and it > 0:
+        # Gated evaluator switch: for iters below nn_start_iter, always use rollout
+        # evaluator even if latest.ts exists, because early nets are worse than rollout
+        # and can poison data with memorization/overfitting
+        nn_start_iters = cfg.get("selfplay", {}).get("nn_start_iter", 5)
+        if it < nn_start_iters:
+            ev = "rollout"
+        elif nn_ok and os.path.exists(latest_ts) and it > 0:
             ev = f"nn:{latest_ts}"
         # playout-cap randomization flags come from config when present
         cmd = [f"{a.build}/selfplay", "--game", a.game, "--games", str(sp["games_per_iter"]), "--sims", str(sp["simulations"]),
@@ -64,14 +71,51 @@ def main():
         if buf is None:
             buf = ReplayBuffer(cfg["training"]["replay_capacity"], shape["planes"], shape["h"], shape["w"], shape["actions"])
             net, opt, step = make_trainer(cfg["network"], shape, cfg["training"]["lr"], cfg["training"].get("weight_decay", 1e-4), cfg["training"].get("mixed_precision", True))
-        buf.add(x, pi, z, full); losses = {}
-        for _ in range(cfg["training"]["steps_per_iter"]):
+        # Hold-out split: reserve last ~10% of the batch NEVER to be added to ReplayBuffer
+        (train_x, train_pi, train_z, train_full,
+         holdout_x, holdout_pi, holdout_z, holdout_full) = split_held_out(
+             x, pi, z, full, holdout_frac=0.1)
+        # Evaluate network on held-out data for monitoring
+        net.eval()
+        device = next(net.parameters()).device
+        with torch.no_grad():
+            holdout_x_t = torch.as_tensor(holdout_x, device=device)
+            holdout_pi_t = torch.as_tensor(holdout_pi, device=device)
+            holdout_z_t = torch.as_tensor(holdout_z, device=device)
+            logits_ho, v_ho = net(holdout_x_t)
+            # Policy cross-entropy (average over held-out samples, uniform weights)
+            per = -(holdout_pi_t * F.log_softmax(logits_ho.float(), -1)).sum(-1)
+            heldout_policy_loss = per.mean().item()
+            # Value MSE
+            heldout_value_mse = F.mse_loss(v_ho.squeeze(), holdout_z_t).item()
+        # Add only train portion to replay buffer
+        buf.add(train_x, train_pi, train_z, train_full)
+        # Update-to-data ratio control: clamp steps_per_iter so
+        # (steps * batch) / fresh_positions_incl_augment <= max_reuse_ratio
+        max_reuse_ratio = cfg["training"].get("max_reuse_ratio", 3.0)
+        fresh_positions = len(z)  # total fresh positions after augmentation
+        batch_size = cfg["training"]["batch_size"]
+        max_allowed_steps = int(max_reuse_ratio * fresh_positions / batch_size)
+        effective_steps = min(cfg["training"]["steps_per_iter"], max_allowed_steps)
+        # Train for effective_steps
+        losses = {}
+        for _ in range(effective_steps):
             try:
-                losses = step(*buf.sample(cfg["training"]["batch_size"]))
+                losses = step(*buf.sample(batch_size))
             except TypeError:
-                xb, pib, zb = buf.sample(cfg["training"]["batch_size"])[:3]
+                xb, pib, zb = buf.sample(batch_size)[:3]
                 losses = step(xb, pib, zb)
-        el = time.time() - t0; log.write(json.dumps(dict(iter=it, elapsed_s=round(el, 1), selfplay=stats, replay=buf.n, **losses)) + "\n"); log.flush(); it += 1
+        el = time.time() - t0
+        log.write(json.dumps(dict(iter=it, elapsed_s=round(el, 1), selfplay=stats,
+                                replay=buf.n,
+                                heldout_policy=heldout_policy_loss,
+                                heldout_value=heldout_value_mse,
+                                effective_steps=effective_steps,
+                                max_reuse_ratio=max_reuse_ratio,
+                                fresh_positions=fresh_positions,
+                                evaluator=ev,
+                                **losses)) + "\n")
+        log.flush(); it += 1
         save_checkpoint(net, os.path.join(a.out, "latest.pt"))
         try:
             export_torchscript(net, shape, latest_ts)
