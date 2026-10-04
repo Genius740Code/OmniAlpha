@@ -127,6 +127,7 @@ GameRecord<G> play_selfplay_game(const SelfPlayConfig& cfg, Evaluator<G>& ev, Rn
       if (cfg.policy_pruning) mcts.improved_policy(sm.policy.data());
       else mcts.visit_policy(sm.policy.data());
       m = mcts.sample_move(rec.plies < cfg.temperature_moves ? cfg.temperature : 0.f, rng);
+    sm.q = mcts.root_value();  // search root-value at move time, for value-target mixing
     }
     rec.samples.push_back(std::move(sm));
     G::apply(s, m); rec.plies++;
