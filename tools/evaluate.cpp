@@ -19,6 +19,7 @@ template <class T> int run(const Args& a) {
 
   int games = (int)a.num("games", 100);
   int sims[2] = {(int)a.num("sims-a", 400), (int)a.num("sims-b", 100)};
+  float cpuct[2] = {(float)a.dbl("cpuct-a", 1.5), (float)a.dbl("cpuct-b", 1.5)};
   std::unique_ptr<Evaluator<G>> ev[2] = {make_evaluator<G>(evaluator_a_str, 11), make_evaluator<G>(evaluator_b_str, 22)};
   Rng rng((uint64_t)a.num("seed", 5)); int w = 0, l = 0, d = 0; int opening_plies = (int)a.num("opening-plies", 2);
   for (int g = 0; g < games; g++) {
@@ -26,7 +27,9 @@ template <class T> int run(const Args& a) {
     // randomized opening (same for both colors of a pair would be better: TODO paired openings)
     auto s = G::initial(); Rng orng(1000 + g / 2);
     for (int i = 0; i < opening_plies && !G::is_terminal(s); i++) { Move mv[G::kMaxMoves]; int n = G::legal_moves(s, mv); G::apply(s, mv[orng.below(n)]); }
-    MCTS<G> tree[2]; tree[0].set_root(s); tree[1].set_root(s);
+    MctsConfig mc[2]; mc[0].c_puct = cpuct[0]; mc[1].c_puct = cpuct[1];
+    MCTS<G> tree[2] = {MCTS<G>(mc[0]), MCTS<G>(mc[1])};
+    tree[0].set_root(s); tree[1].set_root(s);
     while (!G::is_terminal(s)) {
       int who = (G::current_player(s) == a_is) ? 0 : 1;  // 0 = A, 1 = B
       SearchLimits L; L.min_simulations = L.target_simulations = L.max_simulations = sims[who];
