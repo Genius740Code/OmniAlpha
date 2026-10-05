@@ -58,7 +58,8 @@ def main():
                "--full-prob", str(sp.get("full_prob", 1.0)), "--cheap-frac", str(sp.get("cheap_frac", 0.125)),
                "--forced", str(sp.get("forced", 1)), "--prune", str(sp.get("prune", 1)),
                "--shortcuts", str(sp.get("shortcuts", 1)),
-               "--gumbel", str(sp.get("gumbel", 0)), "--gumbel-sims", str(sp.get("gumbel_sims", 32))]
+               "--gumbel", str(sp.get("gumbel", 0)), "--gumbel-sims", str(sp.get("gumbel_sims", 32)),
+               "--value-lambda", str(sp.get("value_lambda", 0.1))]
         try:
             stats = sh_json(cmd)
         except RuntimeError as e:

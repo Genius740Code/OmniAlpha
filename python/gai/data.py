@@ -1,20 +1,20 @@
-"""Reader for engine/selfplay/selfplay.hpp sample files (v2 and v3)."""
+"""Reader for engine/selfplay/selfplay.hpp sample files (v2, v3, v4)."""
 import numpy as np, struct
 
 def read_samples(path):
     with open(path, "rb") as f:
         assert f.read(4) == b"GAIS", "bad magic"
         ver, planes, h, w, actions = struct.unpack("<5I", f.read(20))
-        assert ver in (2, 3), f"unsupported version {ver}"
+        assert ver in (2, 3, 4), f"unsupported version {ver}"
         raw = np.fromfile(f, dtype="<f4")
     in_n = planes * h * w
-    rec = in_n + actions + (2 if ver == 3 else 1)
+    rec = in_n + actions + (3 if ver == 4 else (2 if ver == 3 else 1))
     assert raw.size % rec == 0, "truncated file"
     raw = raw.reshape(-1, rec)
     x = raw[:, :in_n].reshape(-1, planes, h, w)
     pi = raw[:, in_n:in_n + actions]
     z = raw[:, in_n + actions]
-    full = raw[:, in_n + actions + 1] if ver == 3 else np.ones(len(z), np.float32)
+    full = raw[:, in_n + actions + 1] if ver >= 3 else np.ones(len(z), np.float32)
     return x, pi, z, dict(planes=planes, h=h, w=w, actions=actions, full=full)
 
 def mirror_augment_connect4(x, pi):
