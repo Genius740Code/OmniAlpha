@@ -20,6 +20,7 @@ template <class T> int run(const Args& a) {
   int games = (int)a.num("games", 100);
   int sims[2] = {(int)a.num("sims-a", 400), (int)a.num("sims-b", 100)};
   float cpuct[2] = {(float)a.dbl("cpuct-a", 1.5), (float)a.dbl("cpuct-b", 1.5)};
+  float lcb[2] = {(float)a.dbl("lcb-a", 0), (float)a.dbl("lcb-b", 0)};
   std::unique_ptr<Evaluator<G>> ev[2] = {make_evaluator<G>(evaluator_a_str, 11), make_evaluator<G>(evaluator_b_str, 22)};
   Rng rng((uint64_t)a.num("seed", 5)); int w = 0, l = 0, d = 0; int opening_plies = (int)a.num("opening-plies", 2);
   for (int g = 0; g < games; g++) {
@@ -34,7 +35,7 @@ template <class T> int run(const Args& a) {
       int who = (G::current_player(s) == a_is) ? 0 : 1;  // 0 = A, 1 = B
       SearchLimits L; L.min_simulations = L.target_simulations = L.max_simulations = sims[who];
       auto rep = adaptive_search<G>(tree[who], *ev[who], L); (void)rep;
-      Move m = tree[who].sample_move(0.f, rng);
+      Move m = lcb[who] > 0 ? tree[who].best_move_lcb(lcb[who]) : tree[who].sample_move(0.f, rng);
       G::apply(s, m); tree[0].advance_root(m); tree[1].advance_root(m);
     }
     float o = G::outcome(s, a_is); (o > 0 ? w : o < 0 ? l : d)++;

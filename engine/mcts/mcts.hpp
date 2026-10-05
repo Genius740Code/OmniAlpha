@@ -166,6 +166,31 @@ template <GameLike G> class MCTS {
     int bi = 0; for (int i = 1; i < num_root_children(); i++) if (child_visits(i) > child_visits(bi)) bi = i;
     return child_move(bi);
   }
+  // A6 LCB move selection: pick by lower confidence bound on value instead of
+  // raw visits, so a barely-visited move with a lucky value isn't chosen.
+  // lcb_i = q_i - beta*sqrt(log(N+1)/(n_i+1)), q from chooser's view. beta<=0
+  // disables (falls back to best_move). Proven wins short-circuit; proven
+  // losses excluded unless all children are lost.
+  Move best_move_lcb(float beta) const {
+    int nc = num_root_children();
+    if (nc <= 0) return -1;
+    if (beta <= 0) return best_move();
+    int fc = nodes_[root_].first_child;
+    for (int i = 0; i < nc; i++) if (nodes_[fc + i].proven == 1) return child_move(i);
+    bool all_loss = true;
+    for (int i = 0; i < nc; i++) if (nodes_[fc + i].proven != -1) { all_loss = false; break; }
+    float tot = 0;
+    for (int i = 0; i < nc; i++) tot += (float)child_visits(i);
+    float logN = std::log(tot + 1.f);
+    int bi = -1; float bs = -1e30f;
+    for (int i = 0; i < nc; i++) {
+      if (nodes_[fc + i].proven == -1 && !all_loss) continue;
+      float q = child_q(i);
+      float lcb = q - beta * std::sqrt(logN / ((float)child_visits(i) + 1.f));
+      if (bi < 0 || lcb > bs) { bs = lcb; bi = i; }
+    }
+    return bi < 0 ? best_move() : child_move(bi);
+  }
   int8_t root_proven() const { return nodes_[root_].proven; }
   int8_t node_proven(int node) const { return nodes_[node].proven; }
   void top2_visits(int& best, int& second) const {
