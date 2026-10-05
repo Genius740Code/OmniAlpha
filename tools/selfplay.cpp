@@ -28,16 +28,33 @@ template <class T> int run(const Args& a) {
   cfg.mcts.loss_fallthrough = (int)a.num("loss-fallthrough", 1) != 0;
   cfg.resign_q = (float)a.dbl("resign-q", -2.0);
   cfg.resign_min_plies = (int)a.num("resign-min-plies", 10);
+  cfg.lanes = std::max(1, (int)a.num("lanes", 1));
+  if (cfg.lanes > 1 && cfg.mcts.gumbel) {
+    std::fprintf(stderr, "lanes>1 with gumbel: falling back to per-game (Gumbel has own batching)\n");
+    cfg.lanes = 1;
+  }
   std::string ev_spec = a.str("evaluator", "rollout"); uint64_t seed = (uint64_t)a.num("seed", 1);
   SampleWriter<G> writer(a.str("out", "selfplay.bin").c_str());
   if (!writer.ok()) { std::fprintf(stderr, "cannot open output\n"); return 1; }
   std::atomic<int> next{0}, done{0}; std::atomic<long> positions{0}, w0{0}, w1{0}, dr{0}; auto t0 = std::chrono::steady_clock::now();
   auto worker = [&](int tid) {
     Rng rng(seed * 1000003 + tid); auto ev = make_evaluator<G>(ev_spec, seed * 77 + tid);
-    while (next.fetch_add(1) < games) {
-      auto rec = play_selfplay_game<G>(cfg, *ev, rng); writer.write(rec);
+    auto count = [&](const GameRecord<G>& rec) {
+      writer.write(rec);
       positions += (long)rec.samples.size(); done++;
-      (rec.outcome_p0 > 0 ? w0 : rec.outcome_p0 < 0 ? w1 : dr)++;
+      if (rec.outcome_p0 > 0) w0++; else if (rec.outcome_p0 < 0) w1++; else dr++;
+    };
+    if (cfg.lanes > 1) {
+      while (true) {
+        int base = next.fetch_add(cfg.lanes);
+        if (base >= games) break;
+        int L = std::min(cfg.lanes, games - base);
+        for (auto& rec : play_selfplay_lanes<G>(cfg, *ev, rng, L)) count(rec);
+      }
+      return;
+    }
+    while (next.fetch_add(1) < games) {
+      auto rec = play_selfplay_game<G>(cfg, *ev, rng); count(rec);
     }
   };
   std::vector<std::thread> th; for (int i = 0; i < threads; i++) th.emplace_back(worker, i); for (auto& t : th) t.join();

@@ -68,7 +68,8 @@ def main():
                "--dirichlet", str(sp.get("dirichlet", 0.3)),
                "--temp-moves", str(sp.get("temperature_moves", 10)),
                "--loss-fallthrough", str(sp.get("loss_fallthrough", 1)),
-               "--gumbel-sigma-mctx", str(sp.get("gumbel_sigma_mctx", 0))]
+               "--gumbel-sigma-mctx", str(sp.get("gumbel_sigma_mctx", 0)),
+               "--lanes", str(sp.get("lanes", 1))]
         # threads "auto" (or absent) = let the tool default to hardware_concurrency;
         # atol("auto")==0 would spawn zero workers, so only forward numeric values.
         try:
@@ -101,7 +102,8 @@ def main():
                                  "--dirichlet", str(sp.get("dirichlet", 0.3)),
                "--temp-moves", str(sp.get("temperature_moves", 10)),
                                  "--loss-fallthrough", str(sp.get("loss_fallthrough", 1)),
-                                 "--gumbel-sigma-mctx", str(sp.get("gumbel_sigma_mctx", 0))])
+                                 "--gumbel-sigma-mctx", str(sp.get("gumbel_sigma_mctx", 0)),
+               "--lanes", str(sp.get("lanes", 1))])
             else:
                 raise
         x, pi, z, shape = read_samples(data)

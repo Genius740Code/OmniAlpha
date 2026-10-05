@@ -28,6 +28,9 @@ struct SelfPlayConfig {
                                   // (matches tools/selfplay --value-lambda and orchestrator defaults)
   float resign_q = -2.0f;         // resign when full-search root_value < this; <=-1.5 disables
   int resign_min_plies = 10;      // don't resign before this many plies
+  int lanes = 1;                  // lockstep games per worker (>1 batches one leaf
+                                  // per game into a single evaluator call; no virtual
+                                  // loss, unchanged per-tree semantics; non-Gumbel only)
   MctsConfig mcts;
 };
 
@@ -159,6 +162,117 @@ GameRecord<G> play_selfplay_game(const SelfPlayConfig& cfg, Evaluator<G>& ev, Rn
     sm.value = (1.f - cfg.value_lambda) * z + cfg.value_lambda * sm.q;
   }
   return rec;
+}
+
+// Lane-batched selfplay: L games stepped in lockstep. Per-move logic mirrors
+// play_selfplay_game exactly (shortcuts, full/cheap, noise, temperature, resign,
+// value mixing); only the search phase differs: one leaf per unfinished game is
+// selected per round and all leaves share a single evaluator call. No virtual
+// loss, unchanged per-tree semantics. Non-Gumbel path only: Gumbel uses its own
+// internal batching (run_gumbel_root), so Gumbel+lanes falls back to per-game.
+// Returns one GameRecord per lane (all finalized with blended values).
+template <GameLike G>
+std::vector<GameRecord<G>> play_selfplay_lanes(const SelfPlayConfig& cfg, Evaluator<G>& ev, Rng& rng, int L) {
+  struct Slot {
+    MCTS<G> m; typename G::State s; GameRecord<G> rec;
+    bool active = true, resigned = false; int resign_loser = -1;
+    bool has_sm = false, full = false; int sims_left = 0; Sample<G> sm;
+  };
+  std::vector<Slot> sl(L);
+  for (auto& t : sl) { t.m = MCTS<G>(cfg.mcts); t.s = G::initial(); t.m.set_root(t.s); }
+  auto finalize = [&](Slot& t) {
+    if (t.resigned) t.rec.outcome_p0 = (t.resign_loser == 0 ? -1.f : 1.f);
+    else t.rec.outcome_p0 = G::outcome(t.s, 0);
+    for (auto& sm : t.rec.samples) {
+      float z = t.resigned ? (sm.player == t.resign_loser ? -1.f : 1.f)
+                           : G::outcome(t.s, sm.player);
+      sm.value = (1.f - cfg.value_lambda) * z + cfg.value_lambda * sm.q;
+    }
+    t.active = false;
+  };
+  int alive = L;
+  Move mv[G::kMaxMoves];
+  while (alive > 0) {
+    // Phase A: per-slot move prelude (identical logic to play_selfplay_game).
+    for (auto& t : sl) {
+      if (!t.active || t.has_sm) continue;
+      if (G::is_terminal(t.s) || t.rec.plies >= G::kMaxGameLength) { finalize(t); alive--; continue; }
+      int nm = G::legal_moves(t.s, mv);
+      if (cfg.enable_shortcuts && nm == 1) {
+        G::apply(t.s, mv[0]); t.rec.plies++;
+        t.m.set_root(t.s);
+        continue;  // no sample; slot needs another prelude next pass
+      }
+      Move sc = -1; bool is_win = false;
+      if (cfg.enable_shortcuts && ((is_win = find_win_in_1<G>(t.s, &sc)) || find_block_in_1<G>(t.s, &sc))) {
+        Sample<G> sm; sm.input.resize(input_size<G>()); sm.policy.resize(G::kActionCount, 0.f);
+        sm.player = G::current_player(t.s); sm.full_search = 0.f;
+        sm.q = is_win ? 1.f : 0.f;
+        G::encode(t.s, sm.input.data());
+        if (sc >= 0 && sc < G::kActionCount) sm.policy[sc] = 1.f;
+        t.rec.samples.push_back(std::move(sm));
+        G::apply(t.s, sc); t.rec.plies++;
+        t.m.set_root(t.s);
+        continue;
+      }
+      t.full = rng.uniform() < cfg.full_search_prob;
+      int sims = cfg.simulations;
+      if (!t.full) sims = std::max(cfg.cheap_min_sims, (int)(cfg.simulations * cfg.cheap_sim_fraction));
+      int have = t.m.root_expanded() ? t.m.total_visits() : 0;
+      if (!t.m.root_expanded()) t.m.run(1, ev, 1);
+      t.sm = Sample<G>(); t.sm.input.resize(input_size<G>()); t.sm.policy.resize(G::kActionCount);
+      t.sm.player = G::current_player(t.s);
+      t.sm.full_search = t.full ? 1.f : 0.f;
+      G::encode(t.s, t.sm.input.data());
+      t.m.add_root_noise(rng);
+      t.sims_left = std::max(0, sims - have);
+      t.has_sm = true;
+    }
+    // Phase B: lockstep batched search, one leaf per unfinished slot per round.
+    bool need = true;
+    while (need) {
+      need = false;
+      std::vector<std::pair<int, typename MCTS<G>::Leaf>> picks;
+      std::vector<typename G::State> sts;
+      for (int i = 0; i < L; i++) {
+        if (!sl[i].active || !sl[i].has_sm || sl[i].sims_left <= 0) continue;
+        need = true;
+        auto lf = sl[i].m.select_leaf();
+        if (!lf.terminal) sts.push_back(lf.state);
+        picks.emplace_back(i, lf);
+      }
+      if (picks.empty()) break;
+      std::vector<EvalResult<G>> res(sts.size());
+      if (!sts.empty()) ev.evaluate(sts.data(), res.data(), (int)sts.size());
+      size_t k = 0;
+      for (auto& [i, lf] : picks) {
+        sl[i].m.finish_leaf(lf, lf.terminal ? nullptr : &res[k++]);
+        sl[i].sims_left--;
+      }
+    }
+    // Phase C: per-slot move selection (identical logic to play_selfplay_game).
+    for (auto& t : sl) {
+      if (!t.active || !t.has_sm) continue;
+      t.has_sm = false;
+      if (cfg.policy_pruning) t.m.improved_policy(t.sm.policy.data());
+      else t.m.visit_policy(t.sm.policy.data());
+      Move m = t.m.sample_move(t.rec.plies < cfg.temperature_moves ? cfg.temperature : 0.f, rng);
+      t.sm.q = t.m.root_value();
+      if (!t.resigned && cfg.resign_q > -1.5f && t.full && t.rec.plies >= cfg.resign_min_plies
+          && t.m.root_value() < cfg.resign_q) {
+        t.resigned = true; t.resign_loser = t.sm.player;
+        t.rec.samples.push_back(std::move(t.sm));
+        finalize(t); alive--;
+        continue;
+      }
+      t.rec.samples.push_back(std::move(t.sm));
+      G::apply(t.s, m); t.rec.plies++;
+      if (cfg.reuse_tree) t.m.advance_root(m); else t.m.set_root(t.s);
+    }
+  }
+  std::vector<GameRecord<G>> out(L);
+  for (int i = 0; i < L; i++) out[i] = std::move(sl[i].rec);
+  return out;
 }
 
 template <GameLike G> class SampleWriter {
