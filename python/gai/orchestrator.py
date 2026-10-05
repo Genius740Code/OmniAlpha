@@ -62,7 +62,8 @@ def main():
                "--value-lambda", str(sp.get("value_lambda", 0.1)),
                "--prior-temp", str(sp.get("prior_temp", 1.0)),
                "--resign-q", str(sp.get("resign_q", -2.0)),
-               "--resign-min-plies", str(sp.get("resign_min_plies", 10))]
+               "--resign-min-plies", str(sp.get("resign_min_plies", 10)),
+               "--batch", str(sp.get("batch", 1))]
         try:
             stats = sh_json(cmd)
         except RuntimeError as e:
