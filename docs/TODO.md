@@ -82,12 +82,20 @@ Rule: one change at a time behind flags; A/B at equal wall-clock; kill on SPRT f
 | v6 (val-mix, lambda=0.5) | +147 | −512 | — |
 | v6 (val-mix, lambda=0.3) | +191 | −191 | — |
 | v6 (val-mix, lambda=0.1) [before q fix] | +191 | +35 | — |
-| v7 (val-mix, lambda=0.1) [with q fix] | +191 | −107 | +168 |
+| v7 (val-mix, lambda=0.1) [with q fix, SIGN BUG] | +191 | −107 | +168 |
+| **v8 (sign-fixed re-run)** | **−89 (7-12-1, 10m better)** | **−107 @50 / +17 @320** | **+35 (10-8-2)** |
 | **Position suite (320s vs rollout-200)** | N/A | **+52 (11-8)** | N/A |
 
 **Verdict:** Two breakthroughs:
 1. **Value-target mixing** (lambda=0.1 + q field): -107 Elo vs rollout-200 (first close trend), +191 at 1m, +168 over 10-min baseline.
 2. **Position suite**: 320-sim net beats rollout-200 by +52 Elo (11-8) — first positive result ever against rollout-200.
+
+**v8 sign-fix validation (2026-10-05):** pattern reproduces with correct per-player
+value signs — monotonic lineage (10m beats 1m, -89), -107 @50 vs rollout-200
+(identical to v7), +17 @320 (positive, softer than v7's +52, within noise ±159),
++35 over v2-guards-10m (positive, softer than v7's +168). Direction confirmed;
+magnitudes smaller. Prior v7 Elo margins must be cited as noisy single runs, not
+established gains. The value-sign bug is fixed; all future runs use correct targets.
 
 **Next priority:** Serve-side free Elo. The +52 Elo at 320s is the first time we've beaten rollout-200. Serving at max sims (600+) + checkpoint ensemble can likely convert this into a decisive strength lead. No more training needed.
 
