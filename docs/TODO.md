@@ -84,6 +84,9 @@ Rule: one change at a time behind flags; A/B at equal wall-clock; kill on SPRT f
 | v6 (val-mix, lambda=0.1) [before q fix] | +191 | +35 | — |
 | v7 (val-mix, lambda=0.1) [with q fix, SIGN BUG] | +191 | −107 | +168 |
 | **v8 (sign-fixed re-run)** | **−89 (7-12-1, 10m better)** | **−107 @50 / +17 @320** | **+35 (10-8-2)** |
+| v9 (audit batch, steps starved 8/iter) | +52 inv (11-8, 1m better) | −301 @50 / −147 @320 | — |
+| v9b (repeat, steps starved) | −52 (8-11-1, 10m better) | −241 @50 | — |
+| **v10 (steps restored 11/iter)** | **−89 (6-11-3, 10m better)** | **−301 @50 / −147 @320** | **−17 vs v8-10m (9-10-1, EVEN)** |
 | **Position suite (320s vs rollout-200)** | N/A | **+52 (11-8)** | N/A |
 
 **Verdict:** Two breakthroughs:
@@ -96,6 +99,17 @@ value signs — monotonic lineage (10m beats 1m, -89), -107 @50 vs rollout-200
 +35 over v2-guards-10m (positive, softer than v7's +168). Direction confirmed;
 magnitudes smaller. Prior v7 Elo margins must be cited as noisy single runs, not
 established gains. The value-sign bug is fixed; all future runs use correct targets.
+
+**v9/v10 audit-batch validation (2026-10-05):** the batch (split-before-augment,
+loss fallthrough, exact sims, threads forwarding) initially looked like a
+regression (v9: inverted lineage, -301 vs rollout). Root-caused one self-inflicted
+wound: the reuse-clamp denominator change starved training 11.3→8 steps/iter.
+After fix (v10, 11/iter): monotonic lineage restored, but rollout gap (-301 @50,
+-147 @320) persists vs v8's (-107, +17). Decisive datum: v10-10m vs v8-10m is
+9-10-1 (-17, EVEN) — the regimes produce equal-strength nets; rollout-delta
+differences sit inside combined 20-game CIs. Lesson: 20-game arenas cannot
+resolve ~100 Elo questions. 100-game arena (threaded) running as the first
+trustworthy claim; all future gates use 100 games or suite metric.
 
 **Next priority:** Serve-side free Elo. The +52 Elo at 320s is the first time we've beaten rollout-200. Serving at max sims (600+) + checkpoint ensemble can likely convert this into a decisive strength lead. No more training needed.
 
