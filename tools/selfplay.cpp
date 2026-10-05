@@ -22,8 +22,10 @@ template <class T> int run(const Args& a) {
   cfg.cheap_min_sims = (int)a.num("cheap-min", 10);
   cfg.mcts.gumbel = (int)a.num("gumbel", 0) != 0;
   cfg.mcts.gumbel_sims = (int)a.num("gumbel-sims", 32);
+  cfg.mcts.gumbel_sigma_mctx = (int)a.num("gumbel-sigma-mctx", 0) != 0;
   cfg.value_lambda = (float)a.dbl("value-lambda", 0.1);
   cfg.mcts.prior_temp = (float)a.dbl("prior-temp", 1.0);
+  cfg.mcts.loss_fallthrough = (int)a.num("loss-fallthrough", 1) != 0;
   cfg.resign_q = (float)a.dbl("resign-q", -2.0);
   cfg.resign_min_plies = (int)a.num("resign-min-plies", 10);
   std::string ev_spec = a.str("evaluator", "rollout"); uint64_t seed = (uint64_t)a.num("seed", 1);

@@ -24,7 +24,8 @@ struct SelfPlayConfig {
   float full_search_prob = 1.0f;  // playout-cap randomization: P(full sims); else cheap
   float cheap_sim_fraction = 0.125f;
   int cheap_min_sims = 10;
-  float value_lambda = 0.5f;      // soft-Z: blend outcome with search Q [0,1]
+  float value_lambda = 0.1f;      // soft-Z: blend outcome with search Q [0,1]
+                                  // (matches tools/selfplay --value-lambda and orchestrator defaults)
   float resign_q = -2.0f;         // resign when full-search root_value < this; <=-1.5 disables
   int resign_min_plies = 10;      // don't resign before this many plies
   MctsConfig mcts;

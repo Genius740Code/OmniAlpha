@@ -67,10 +67,21 @@ GumbelResult<G> run_gumbel_root(MCTS<G>& mcts, Evaluator<G>& ev, const MctsConfi
   // (log-softmax) spread ~2-4, so raw sigma swamps logits+Gumbel ~10:1 and
   // targets collapse to near-one-hot on noisy Q. Rescale sigma to the logit
   // spread (centered): all three score terms stay comparable, as in mctx.
+  // NOTE (audit): in spread mode the c_visit/c_scale knobs cancel algebraically
+  // (sigma = (q-mean)/(max-min)*lo_spread) -- they only take effect in mctx mode.
   float lo_min = *std::min_element(logits.begin(), logits.end());
   float lo_max = *std::max_element(logits.begin(), logits.end());
   float lo_spread = std::max(lo_max - lo_min, 1e-3f);
   auto sigma_of = [&](int i, int maxN) {
+    if (cfg.gumbel_sigma_mctx) {
+      float qmin = 1e30f, qmax = -1e30f;
+      for (int j = 0; j < nc; j++) {
+        float q = q01(j);
+        qmin = std::min(qmin, q); qmax = std::max(qmax, q);
+      }
+      float qn = (q01(i) - qmin) / std::max(qmax - qmin, 1e-6f);
+      return (cfg.gumbel_c_visit + (float)maxN) * cfg.gumbel_c_scale * qn;
+    }
     float raw_n = (cfg.gumbel_c_visit + (float)maxN) * cfg.gumbel_c_scale;
     // min/max/mean of raw across children at this maxN (raw linear in q01)
     float qmin = 1e30f, qmax = -1e30f, qsum = 0.f;

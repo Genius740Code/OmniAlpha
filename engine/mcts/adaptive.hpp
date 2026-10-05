@@ -27,7 +27,10 @@ SearchReport adaptive_search(MCTS<G>& mcts, Evaluator<G>& ev, const SearchLimits
   int start = mcts.total_visits();
   Move leader = -1; int last_change = 0; int sims = 0;
   while (true) {
-    mcts.run(L.check_every, ev, L.batch);
+    // Clamp the last chunk so reported sims are exact (no +check_every overshoot).
+    int chunk = std::min(L.check_every, L.max_simulations - sims);
+    if (chunk <= 0) break;
+    mcts.run(chunk, ev, L.batch);
     sims = mcts.total_visits() - start; double t = ms();
     if (G::is_terminal(mcts.root_state())) break;
     int b, s2; mcts.top2_visits(b, s2);

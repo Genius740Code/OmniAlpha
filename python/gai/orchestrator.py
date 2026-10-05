@@ -63,7 +63,17 @@ def main():
                "--prior-temp", str(sp.get("prior_temp", 1.0)),
                "--resign-q", str(sp.get("resign_q", -2.0)),
                "--resign-min-plies", str(sp.get("resign_min_plies", 10)),
-               "--batch", str(sp.get("batch", 1))]
+               "--batch", str(sp.get("batch", 1)),
+               "--dirichlet", str(sp.get("dirichlet", 0.3)),
+               "--loss-fallthrough", str(sp.get("loss_fallthrough", 1)),
+               "--gumbel-sigma-mctx", str(sp.get("gumbel_sigma_mctx", 0))]
+        # threads "auto" (or absent) = let the tool default to hardware_concurrency;
+        # atol("auto")==0 would spawn zero workers, so only forward numeric values.
+        try:
+            int(sp.get("threads", "auto"))
+            cmd += ["--threads", str(sp["threads"])]
+        except (ValueError, TypeError, KeyError):
+            pass
         try:
             stats = sh_json(cmd)
         except RuntimeError as e:
@@ -72,14 +82,33 @@ def main():
                 print(f"nn evaluator failed, falling back: {e}")
                 ev = sp.get("evaluator", "rollout")
                 stats = sh_json([f"{a.build}/selfplay", "--game", a.game, "--games", str(sp["games_per_iter"]),
-                                 "--sims", str(sp["simulations"]), "--out", data, "--evaluator", ev, "--seed", str(it + 1)])
+                                 "--sims", str(sp["simulations"]), "--out", data, "--evaluator", ev, "--seed", str(it + 1),
+                                 "--full-prob", str(sp.get("full_prob", 1.0)), "--cheap-frac", str(sp.get("cheap_frac", 0.125)),
+                                 "--forced", str(sp.get("forced", 1)), "--prune", str(sp.get("prune", 1)),
+                                 "--shortcuts", str(sp.get("shortcuts", 1)),
+                                 "--gumbel", str(sp.get("gumbel", 0)), "--gumbel-sims", str(sp.get("gumbel_sims", 32)),
+                                 "--value-lambda", str(sp.get("value_lambda", 0.1)),
+                                 "--prior-temp", str(sp.get("prior_temp", 1.0)),
+                                 "--resign-q", str(sp.get("resign_q", -2.0)),
+                                 "--resign-min-plies", str(sp.get("resign_min_plies", 10)),
+                                 "--batch", str(sp.get("batch", 1)),
+                                 "--dirichlet", str(sp.get("dirichlet", 0.3)),
+                                 "--loss-fallthrough", str(sp.get("loss_fallthrough", 1)),
+                                 "--gumbel-sigma-mctx", str(sp.get("gumbel_sigma_mctx", 0))]
             else:
                 raise
         x, pi, z, shape = read_samples(data)
         full = shape.get("full")
+        # Hold-out split BEFORE augmentation: augmenting first makes held-out
+        # positions mirror twins of training positions (audit #8). Split raw,
+        # then augment the train portion only.
+        (train_x, train_pi, train_z, train_full,
+         holdout_x, holdout_pi, holdout_z, holdout_full) = split_held_out(
+             x, pi, z, full, holdout_frac=0.1)
         if sp.get("augment", False):
             from .data import maybe_mirror_batch
-            x, pi, z, full = maybe_mirror_batch(x, pi, z, full)
+            train_x, train_pi, train_z, train_full = maybe_mirror_batch(
+                train_x, train_pi, train_z, train_full)
         if buf is None:
             buf = ReplayBuffer(cfg["training"]["replay_capacity"], shape["planes"], shape["h"], shape["w"], shape["actions"])
             tr = cfg["training"]
@@ -92,10 +121,7 @@ def main():
                 momentum=tr.get("momentum", 0.9))
             base_lr = tr["lr"]
             annealed = False
-        # Hold-out split: reserve last ~10% of the batch NEVER to be added to ReplayBuffer
-        (train_x, train_pi, train_z, train_full,
-         holdout_x, holdout_pi, holdout_z, holdout_full) = split_held_out(
-             x, pi, z, full, holdout_frac=0.1)
+        # (split already done above, before augmentation)
         # Evaluate network on held-out data for monitoring
         net.eval()
         device = next(net.parameters()).device
@@ -114,7 +140,7 @@ def main():
         # Update-to-data ratio control: clamp steps_per_iter so
         # (steps * batch) / fresh_positions_incl_augment <= max_reuse_ratio
         max_reuse_ratio = cfg["training"].get("max_reuse_ratio", 3.0)
-        fresh_positions = len(z)  # total fresh positions after augmentation
+        fresh_positions = len(z)  # raw fresh positions this iter (pre-augment)
         batch_size = cfg["training"]["batch_size"]
         max_allowed_steps = int(max_reuse_ratio * fresh_positions / batch_size)
         effective_steps = min(cfg["training"]["steps_per_iter"], max_allowed_steps)

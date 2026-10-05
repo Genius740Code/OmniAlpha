@@ -23,10 +23,14 @@ struct MctsConfig {
   // Driven explicitly via run_gumbel_root(); the old prior-noise approximation was A/B killed.
   bool gumbel = false;              // selfplay uses run_gumbel_root for full-budget searches
   int gumbel_sims = 32;             // root simulation budget for Gumbel search
-  float gumbel_c_visit = 50.f;      // sigma transform: (c_visit + maxN) * c_scale * q01
-  float gumbel_c_scale = 1.f;
+  float gumbel_c_visit = 50.f;      // mctx maxvisit_init; inert in spread mode
+  float gumbel_c_scale = 0.1f;      // mctx value_scale; inert in spread mode
+  bool gumbel_sigma_mctx = false;   // false=spread-matched sigma (default, knobs inert
+                                    // by construction); true=mctx (c_visit+maxN)*c_scale*minmax(Q)
   float prior_temp = 1.0f;          // A1: root+tree prior softmax temp; 1.0 = off.
                                     // effective prior = prior^(1/temp), temp>1 flattens
+  bool loss_fallthrough = true;     // all-proven-loss node falls through to PUCT
+                                    // (max-resistance) instead of leftmost child
 };
 
 template <GameLike G> class MCTS {
@@ -148,7 +152,7 @@ template <GameLike G> class MCTS {
       float nf = 0;
       if (cfg_.forced_playouts) {
         float total = (float)std::max(1, nodes_[root_].n);
-        nf = std::sqrt(cfg_.forced_k * c.prior * total);
+        nf = std::sqrt(cfg_.forced_k * prior_eff(c.prior) * total);
       }
       float k = (float)c.n - nf;
       if (k <= 1.0f) k = 0;  // outright prune single-playout children
@@ -260,7 +264,9 @@ template <GameLike G> class MCTS {
         else if (nonloss < 0) nonloss = ci;
       }
       if (win >= 0) return win;
-      if (nloss == p.nchild) return p.first_child;  // all lost: fall through to PUCT
+      // All lost: fall through to PUCT over all children (maximum resistance)
+      // instead of the leftmost move. Flag preserves the old behavior.
+      if (nloss == p.nchild && !cfg_.loss_fallthrough) return p.first_child;
       if (nonloss >= 0 && nloss > 0) {
         // Exclude proven losses from PUCT consideration below by restricting to non-loss.
         // Fall through to PUCT but skip proven-loss children.
