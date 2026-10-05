@@ -87,6 +87,9 @@ Rule: one change at a time behind flags; A/B at equal wall-clock; kill on SPRT f
 | v9 (audit batch, steps starved 8/iter) | +52 inv (11-8, 1m better) | −301 @50 / −147 @320 | — |
 | v9b (repeat, steps starved) | −52 (8-11-1, 10m better) | −241 @50 | — |
 | **v10 (steps restored 11/iter)** | **−89 (6-11-3, 10m better)** | **−301 @50 / −147 @320** | **−17 vs v8-10m (9-10-1, EVEN)** |
+| b4 (batch=4, 2.2x pos/s) | -147 1m-view (4-12-4, 10m better) | — | -52 vs v10 (8-11-1) — KILLED |
+| **vw2 (value_weight=2.0) CHAMPION** | **-35 (7-9-4, 10m better)** | **-89 @50 (7-12-1, best @50)** | **+70 vs v10 (11-7-2)** |
+| ann (final anneal 0.15/0.1) | -107 1m-view (7-13, 10m better) | — | +17 vs v10 (9-8-3, even) — neutral |
 | **Position suite (320s vs rollout-200)** | N/A | **+52 (11-8)** | N/A |
 
 **Verdict:** Two breakthroughs:
