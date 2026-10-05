@@ -94,7 +94,7 @@ def main():
                                  "--batch", str(sp.get("batch", 1)),
                                  "--dirichlet", str(sp.get("dirichlet", 0.3)),
                                  "--loss-fallthrough", str(sp.get("loss_fallthrough", 1)),
-                                 "--gumbel-sigma-mctx", str(sp.get("gumbel_sigma_mctx", 0))]
+                                 "--gumbel-sigma-mctx", str(sp.get("gumbel_sigma_mctx", 0))])
             else:
                 raise
         x, pi, z, shape = read_samples(data)
