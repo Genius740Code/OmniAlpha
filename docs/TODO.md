@@ -121,6 +121,21 @@ improvement, honest held-out bounded throughout (best 0.51 @47min, no
 memorization). Competition objective MET: 60m beats 30m 12-7-1 (+89 ±167).
 60m @320 vs rollout-200: -17 (even). 60m checkpoint is the new champion artifact.
 
+**Follow-up round (2026-10-06):**
+- NN-strict shipped (`nn-strict:` spec, exit 4, isfinite checks, fatal export,
+  no-fallback rule) and live-validated: unit tests (corrupt→4, good→0) plus a
+  full 60-min strict run with zero aborts.
+- 60-min strict repeat (results/c4_60min_vw2strict): new-60m vs old-60m 9-11
+  (-35, even — run-to-run reproduction); new-60m vs old-30m 13-7 (+107 —
+  objective re-confirmed on an independent run).
+- Gumbel-mctx training A/B KILLED (second kill): inverted lineage (1m beats 10m
+  13-7) despite stage-1 win; H2H vs vw2 even (+35). Suspect: tree reuse feeding
+  SH allocation (audit #7) and/or temp double-exploration. Code + mctx default kept.
+- Lane batching (`--lanes`, no virtual loss, per-tree semantics preserved):
+  NN throughput 552→1166 pos/s at L=16 (2.11x), entropy/vmean stable
+  (0.41→0.32, +0.02). NOT yet adopted: needs 10-min training A/B (data-regime
+  change, same rule that killed --batch).
+
 **Next priority:** Serve-side free Elo. The +52 Elo at 320s is the first time we've beaten rollout-200. Serving at max sims (600+) + checkpoint ensemble can likely convert this into a decisive strength lead. No more training needed.
 
 ## Notes / corrections
