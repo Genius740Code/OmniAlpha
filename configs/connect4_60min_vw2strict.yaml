@@ -1,0 +1,55 @@
+budget_minutes: 10
+checkpoint:
+  interval_minutes: 1
+clock:
+  emergency_ms: 1000
+  maximum_think_ms: 30000
+  minimum_think_ms: 0
+  safety_margin_ms: 100
+eval:
+  games: 20
+  min_confidence_games: 50
+  promote_if_elo_gain_over: 0
+  sims: 100
+logging:
+  dir: logs
+  format: jsonl
+network:
+  hidden: 128
+  layers: 2
+  type: mlp
+race:
+  candidates:
+  - hidden: 128
+    layers: 2
+    type: mlp
+  enabled: false
+  fraction_of_budget: 0.15
+search:
+  max_simulations: 150
+  min_simulations: 150
+  target_simulations: 150
+selfplay:
+  augment: true
+  cheap_frac: 0.15
+  dirichlet: 0.3
+  evaluator: rollout
+  forced: 1
+  full_prob: 0.25
+  games_per_iter: 24
+  nn_strict: 1
+  prune: 1
+  shortcuts: 1
+  simulations: 150
+  temperature_moves: 10
+  threads: 2
+  value_lambda: 0.1
+training:
+  batch_size: 256
+  lr: 0.001
+  max_reuse_ratio: 3.0
+  mixed_precision: false
+  replay_capacity: 200000
+  steps_per_iter: 30
+  value_weight: 2.0
+  weight_decay: 0.0001
