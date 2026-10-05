@@ -114,6 +114,13 @@ differences sit inside combined 20-game CIs. Lesson: 20-game arenas cannot
 resolve ~100 Elo questions. 100-game arena (threaded) running as the first
 trustworthy claim; all future gates use 100 games or suite metric.
 
+**60-min run (2026-10-06, vw2 champion, results/c4_60min_vw2):** completed with
+1-min checkpoints. Curve @50 vs rollout-200: 10m -107, 20m -241 (dip, noise),
+30m -108, 45m -147, 60m -17. Long mid plateau (train ~2.0 @13-45min), late
+improvement, honest held-out bounded throughout (best 0.51 @47min, no
+memorization). Competition objective MET: 60m beats 30m 12-7-1 (+89 ±167).
+60m @320 vs rollout-200: -17 (even). 60m checkpoint is the new champion artifact.
+
 **Next priority:** Serve-side free Elo. The +52 Elo at 320s is the first time we've beaten rollout-200. Serving at max sims (600+) + checkpoint ensemble can likely convert this into a decisive strength lead. No more training needed.
 
 ## Notes / corrections
