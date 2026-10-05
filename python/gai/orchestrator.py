@@ -66,6 +66,7 @@ def main():
                "--resign-min-plies", str(sp.get("resign_min_plies", 10)),
                "--batch", str(sp.get("batch", 1)),
                "--dirichlet", str(sp.get("dirichlet", 0.3)),
+               "--temp-moves", str(sp.get("temperature_moves", 10)),
                "--loss-fallthrough", str(sp.get("loss_fallthrough", 1)),
                "--gumbel-sigma-mctx", str(sp.get("gumbel_sigma_mctx", 0))]
         # threads "auto" (or absent) = let the tool default to hardware_concurrency;
@@ -98,6 +99,7 @@ def main():
                                  "--resign-min-plies", str(sp.get("resign_min_plies", 10)),
                                  "--batch", str(sp.get("batch", 1)),
                                  "--dirichlet", str(sp.get("dirichlet", 0.3)),
+               "--temp-moves", str(sp.get("temperature_moves", 10)),
                                  "--loss-fallthrough", str(sp.get("loss_fallthrough", 1)),
                                  "--gumbel-sigma-mctx", str(sp.get("gumbel_sigma_mctx", 0))])
             else:
