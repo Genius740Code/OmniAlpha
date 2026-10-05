@@ -138,9 +138,11 @@ def main():
         # Add only train portion to replay buffer
         buf.add(train_x, train_pi, train_z, train_full)
         # Update-to-data ratio control: clamp steps_per_iter so
-        # (steps * batch) / fresh_positions_incl_augment <= max_reuse_ratio
+        # (steps * batch) / train_positions_added <= max_reuse_ratio, where the
+        # denominator is the actual post-augment train positions added to the
+        # buffer this iter (raw len(z) would undercount ~2x and starve training).
         max_reuse_ratio = cfg["training"].get("max_reuse_ratio", 3.0)
-        fresh_positions = len(z)  # raw fresh positions this iter (pre-augment)
+        fresh_positions = len(train_z)
         batch_size = cfg["training"]["batch_size"]
         max_allowed_steps = int(max_reuse_ratio * fresh_positions / batch_size)
         effective_steps = min(cfg["training"]["steps_per_iter"], max_allowed_steps)
