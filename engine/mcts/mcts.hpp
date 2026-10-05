@@ -25,8 +25,10 @@ struct MctsConfig {
   int gumbel_sims = 32;             // root simulation budget for Gumbel search
   float gumbel_c_visit = 50.f;      // mctx maxvisit_init; inert in spread mode
   float gumbel_c_scale = 0.1f;      // mctx value_scale; inert in spread mode
-  bool gumbel_sigma_mctx = false;   // false=spread-matched sigma (default, knobs inert
-                                    // by construction); true=mctx (c_visit+maxN)*c_scale*minmax(Q)
+  bool gumbel_sigma_mctx = true;    // false=spread-matched sigma (knobs inert
+                                    // by construction); true=mctx (c_visit+maxN)*c_scale*minmax(Q).
+                                    // Default mctx: stage-1 winner (16/32/64 sims: 80/91/98%
+                                    // improved-argmax-winning, magnitude 0.64-0.83 vs 0.216).
   float prior_temp = 1.0f;          // A1: root+tree prior softmax temp; 1.0 = off.
                                     // effective prior = prior^(1/temp), temp>1 flattens
   bool loss_fallthrough = true;     // all-proven-loss node falls through to PUCT
