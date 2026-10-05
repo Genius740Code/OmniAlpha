@@ -46,12 +46,13 @@ def main():
         if it < nn_start:
             ev = "rollout"
         elif nn_ok and os.path.exists(latest_ts) and it > 0:
+            tag = "nn-strict" if sp.get("nn_strict", 0) else "nn"
             if sp.get("hybrid", 0):
                 alpha = min(1.0, (it - nn_start + 1) / nn_anneal)
                 ev = f"hybrid:{latest_ts}:{alpha:.3f}"
             else:
                 alpha = 1.0
-                ev = f"nn:{latest_ts}"
+                ev = f"{tag}:{latest_ts}"
         # playout-cap randomization flags come from config when present
         cmd = [f"{a.build}/selfplay", "--game", a.game, "--games", str(sp["games_per_iter"]), "--sims", str(sp["simulations"]),
                "--out", data, "--evaluator", ev, "--seed", str(it + 1),
@@ -77,6 +78,10 @@ def main():
         try:
             stats = sh_json(cmd)
         except RuntimeError as e:
+            if ev.startswith("nn-strict:"):
+                # Strict mode: a failing NN evaluator must kill the run, never
+                # silently fall back to rollout data.
+                raise RuntimeError(f"nn-strict evaluator failed, aborting: {e}")
             if ev.startswith("nn:") or ev.startswith("hybrid:"):  # fall back to CPU evaluator
                 nn_ok = False
                 print(f"nn evaluator failed, falling back: {e}")
@@ -178,7 +183,12 @@ def main():
         try:
             export_torchscript(net, shape, latest_ts)
         except Exception as e:
-            print(f"export ts failed: {e}")
+            # A failed export leaves a STALE latest.ts in use while the log claims
+            # evaluator=nn:..., silently poisoning selfplay. Fatal by default;
+            # set training.allow_stale_export to keep the old warn-and-continue.
+            if not cfg["training"].get("allow_stale_export", False):
+                raise RuntimeError(f"torchscript export failed, aborting: {e}")
+            print(f"export ts failed (continuing with stale {latest_ts}): {e}")
         if el >= next_ck:
             ck = os.path.join(a.out, f"checkpoint_{int(next_ck // 60)}m.pt")
             save_checkpoint(net, ck); next_ck += ck_every

@@ -50,6 +50,10 @@ template <gai::GameLike G> std::unique_ptr<gai::Evaluator<G>> make_evaluator(con
   if (spec == "uniform") return std::make_unique<gai::UniformEvaluator<G>>();
   if (spec.rfind("rollout", 0) == 0) { int n = spec.size() > 8 ? std::atoi(spec.c_str() + 8) : 1; return std::make_unique<gai::RolloutEvaluator<G>>(n > 0 ? n : 1, seed); }
 #ifdef GAI_LIBTORCH
+  if (spec.rfind("nn-strict:", 0) == 0) {
+    std::string path = spec.substr(10);
+    return std::make_unique<gai::NNEvaluator<G>>(path, true);
+  }
   if (spec.rfind("nn:", 0) == 0) {
     std::string path = spec.substr(3);
     return std::make_unique<gai::NNEvaluator<G>>(path);

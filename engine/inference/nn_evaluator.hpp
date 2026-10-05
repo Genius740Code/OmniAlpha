@@ -6,6 +6,7 @@
 #pragma once
 
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <stdexcept>
@@ -30,11 +31,12 @@ static inline void softmax_inplace(float* x, int n) {
 
 template <GameLike G>
 struct NNEvaluator : Evaluator<G> {
-  explicit NNEvaluator(std::string path) : model_path_(std::move(path)) {}
+  explicit NNEvaluator(std::string path, bool strict = false)
+      : model_path_(std::move(path)), strict_(strict) {}
 
   void evaluate(const typename G::State* states, EvalResult<G>* out, int count) override {
     if (!loaded_) try_load();
-    if (!module_) { uniform_fallback(states, out, count); return; }
+    if (!module_) { silent_fallback(states, out, count, "load"); return; }
     const int P = G::kInputPlanes, H = G::kInputH, W = G::kInputW;
     const int PW = P * H * W;
     try {
@@ -55,7 +57,7 @@ struct NNEvaluator : Evaluator<G> {
         logits = t[0].toTensor();
         val = t[1].toTensor();
       } else {
-        uniform_fallback(states, out, count);
+        silent_fallback(states, out, count, "non-tuple");
         return;
       }
       const float* lp = logits.data_ptr<float>();
@@ -71,12 +73,17 @@ struct NNEvaluator : Evaluator<G> {
         softmax_inplace(legal.data(), n);
         for (int j = 0; j < n; j++) out[i].priors[j] = legal[j];
         float vv = vp[i];
+        if (!std::isfinite(vv)) { silent_fallback(states, out, count, "non-finite-value"); return; }
+        for (int j = 0; j < n; j++) {
+          if (!std::isfinite(legal[j])) { silent_fallback(states, out, count, "non-finite-logit"); return; }
+        }
         out[i].value = vv > 1.f ? 1.f : vv < -1.f ? -1.f : vv;
       }
     } catch (const std::exception&) {
-      uniform_fallback(states, out, count);
+      silent_fallback(states, out, count, "exception");
     }
   }
+  long fallbacks() const { return fallbacks_; }
 
  private:
   void try_load() {
@@ -100,9 +107,24 @@ struct NNEvaluator : Evaluator<G> {
       for (int j = 0; j < n; j++) out[i].priors[j] = n ? 1.f / (float)n : 0.f;
     }
   }
+  // Strict mode: any silent fallback is fatal (exit 4) instead of uniform.
+  // A corrupt .ts or NaN weights must never poison a run with exit code 0.
+  [[noreturn]] void die(const char* why) {
+    std::fprintf(stderr, "NNEvaluator(strict): fallback '%s' for '%s'; aborting (exit 4)\n",
+                 why, model_path_.c_str());
+    std::exit(4);
+  }
+  void silent_fallback(const typename G::State* states, EvalResult<G>* out, int count, const char* why) {
+    fallbacks_++;
+    if (strict_) die(why);
+    std::fprintf(stderr, "NNEvaluator: fallback '%s' for '%s' (#%ld); using uniform\n",
+                 why, model_path_.c_str(), fallbacks_);
+    uniform_fallback(states, out, count);
+  }
   std::string model_path_;
   std::shared_ptr<torch::jit::script::Module> module_;
-  bool loaded_ = false;
+  bool loaded_ = false, strict_ = false;
+  long fallbacks_ = 0;
 };
 
 }  // namespace gai
