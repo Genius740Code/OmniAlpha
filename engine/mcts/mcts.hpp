@@ -25,6 +25,8 @@ struct MctsConfig {
   int gumbel_sims = 32;             // root simulation budget for Gumbel search
   float gumbel_c_visit = 50.f;      // sigma transform: (c_visit + maxN) * c_scale * q01
   float gumbel_c_scale = 1.f;
+  float prior_temp = 1.0f;          // A1: root+tree prior softmax temp; 1.0 = off.
+                                    // effective prior = prior^(1/temp), temp>1 flattens
 };
 
 template <GameLike G> class MCTS {
@@ -213,8 +215,11 @@ template <GameLike G> class MCTS {
   }
 
  private:
-  int find_child(int node, Move m) const {
-    const Node& n = nodes_[node];
+  float prior_eff(float p) const {
+    if (cfg_.prior_temp <= 0 || cfg_.prior_temp == 1.0f) return p;
+    return std::pow(std::max(p, 0.f), 1.0f / cfg_.prior_temp);
+  }
+  int find_child(int node, Move m) const {    const Node& n = nodes_[node];
     for (int i = 0; i < n.nchild; i++) if (nodes_[n.first_child + i].move == m) return n.first_child + i;
     return -1;
   }
@@ -241,7 +246,7 @@ template <GameLike G> class MCTS {
       float total = (float)std::max(1, p.n);
       for (int i = 0; i < p.nchild; i++) {
         int ci = p.first_child + i; const Node& c = nodes_[ci];
-        float need = std::sqrt(cfg_.forced_k * c.prior * total);
+        float need = std::sqrt(cfg_.forced_k * prior_eff(c.prior) * total);
         if ((float)(c.n + c.vl) < need) return ci;
       }
     }
@@ -267,7 +272,7 @@ template <GameLike G> class MCTS {
           if (c.proven == -1) continue;
           int ne = c.n + c.vl;
           float q = ne ? (c.w - c.vl) / ne : fpu;
-          float sc = q + cfg_.c_puct * c.prior * sq / (1 + ne);
+          float sc = q + cfg_.c_puct * prior_eff(c.prior) * sq / (1 + ne);
           if (sc > bs) { bs = sc; best = ci; }
         }
         return best;
@@ -280,7 +285,7 @@ template <GameLike G> class MCTS {
       int ci = p.first_child + i; const Node& c = nodes_[ci];
       int ne = c.n + c.vl;
       float q = ne ? (c.w - c.vl) / ne : fpu;   // virtual loss counts as a loss for the chooser
-      float sc = q + cfg_.c_puct * c.prior * sq / (1 + ne);
+      float sc = q + cfg_.c_puct * prior_eff(c.prior) * sq / (1 + ne);
       if (sc > bs) { bs = sc; best = ci; }
     }
     return best;

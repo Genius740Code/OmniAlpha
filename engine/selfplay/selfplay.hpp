@@ -25,6 +25,8 @@ struct SelfPlayConfig {
   float cheap_sim_fraction = 0.125f;
   int cheap_min_sims = 10;
   float value_lambda = 0.5f;      // soft-Z: blend outcome with search Q [0,1]
+  float resign_q = -2.0f;         // resign when full-search root_value < this; <=-1.5 disables
+  int resign_min_plies = 10;      // don't resign before this many plies
   MctsConfig mcts;
 };
 
@@ -68,6 +70,7 @@ template <GameLike G> bool find_block_in_1(const typename G::State& s, Move* out
 template <GameLike G>
 GameRecord<G> play_selfplay_game(const SelfPlayConfig& cfg, Evaluator<G>& ev, Rng& rng) {
   GameRecord<G> rec; MCTS<G> mcts(cfg.mcts); auto s = G::initial(); mcts.set_root(s);
+  bool resigned = false; int resign_loser = -1;
   while (!G::is_terminal(s) && rec.plies < G::kMaxGameLength) {
     Move mv[G::kMaxMoves];
     int nm = G::legal_moves(s, mv);
@@ -127,18 +130,32 @@ GameRecord<G> play_selfplay_game(const SelfPlayConfig& cfg, Evaluator<G>& ev, Rn
       if (cfg.policy_pruning) mcts.improved_policy(sm.policy.data());
       else mcts.visit_policy(sm.policy.data());
       m = mcts.sample_move(rec.plies < cfg.temperature_moves ? cfg.temperature : 0.f, rng);
+    }
     sm.q = mcts.root_value();  // search root-value at move time, for value-target mixing
+    // Resignation: hopeless full-search positions end now; loser = player to move.
+    if (!resigned && cfg.resign_q > -1.5f && full && rec.plies >= cfg.resign_min_plies
+        && mcts.root_value() < cfg.resign_q) {
+      resigned = true; resign_loser = sm.player;
+      rec.samples.push_back(std::move(sm));
+      break;
     }
     rec.samples.push_back(std::move(sm));
     G::apply(s, m); rec.plies++;
     if (cfg.reuse_tree) mcts.advance_root(m); else mcts.set_root(s);
   }
-  rec.outcome_p0 = G::outcome(s, 0);
-  float final_value = G::outcome(s, 0);
+  if (resigned) {
+    rec.outcome_p0 = (resign_loser == 0 ? -1.f : 1.f);
+  } else {
+    rec.outcome_p0 = G::outcome(s, 0);
+  }
   for (auto& sm : rec.samples) {
     // soft-Z style: blend game outcome with search root-value Q.
-    // outcome is +1/0/-1 from player-to-move view; q is the MCTS root_value at move time.
-    sm.value = (1.f - cfg.value_lambda) * final_value + cfg.value_lambda * sm.q;
+    // Both terms are player-to-move view (outcome(s, sm.player); q = root_value
+    // from the chooser's view). NOTE: outcome(s, 0) is p0-view and would flip
+    // the sign for sm.player == 1 samples -- do NOT use it here.
+    float z = resigned ? (sm.player == resign_loser ? -1.f : 1.f)
+                       : G::outcome(s, sm.player);
+    sm.value = (1.f - cfg.value_lambda) * z + cfg.value_lambda * sm.q;
   }
   return rec;
 }

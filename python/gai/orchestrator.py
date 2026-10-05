@@ -59,7 +59,10 @@ def main():
                "--forced", str(sp.get("forced", 1)), "--prune", str(sp.get("prune", 1)),
                "--shortcuts", str(sp.get("shortcuts", 1)),
                "--gumbel", str(sp.get("gumbel", 0)), "--gumbel-sims", str(sp.get("gumbel_sims", 32)),
-               "--value-lambda", str(sp.get("value_lambda", 0.1))]
+               "--value-lambda", str(sp.get("value_lambda", 0.1)),
+               "--prior-temp", str(sp.get("prior_temp", 1.0)),
+               "--resign-q", str(sp.get("resign_q", -2.0)),
+               "--resign-min-plies", str(sp.get("resign_min_plies", 10))]
         try:
             stats = sh_json(cmd)
         except RuntimeError as e:
@@ -78,7 +81,16 @@ def main():
             x, pi, z, full = maybe_mirror_batch(x, pi, z, full)
         if buf is None:
             buf = ReplayBuffer(cfg["training"]["replay_capacity"], shape["planes"], shape["h"], shape["w"], shape["actions"])
-            net, opt, step = make_trainer(cfg["network"], shape, cfg["training"]["lr"], cfg["training"].get("weight_decay", 1e-4), cfg["training"].get("mixed_precision", True))
+            tr = cfg["training"]
+            net, opt, step, set_lr = make_trainer(
+                cfg["network"], shape, tr["lr"], tr.get("weight_decay", 1e-4),
+                tr.get("mixed_precision", True),
+                value_weight=tr.get("value_weight", 1.0),
+                grad_clip=tr.get("grad_clip", 0.0),
+                optimizer=tr.get("optimizer", "adamw"),
+                momentum=tr.get("momentum", 0.9))
+            base_lr = tr["lr"]
+            annealed = False
         # Hold-out split: reserve last ~10% of the batch NEVER to be added to ReplayBuffer
         (train_x, train_pi, train_z, train_full,
          holdout_x, holdout_pi, holdout_z, holdout_full) = split_held_out(
@@ -105,6 +117,15 @@ def main():
         batch_size = cfg["training"]["batch_size"]
         max_allowed_steps = int(max_reuse_ratio * fresh_positions / batch_size)
         effective_steps = min(cfg["training"]["steps_per_iter"], max_allowed_steps)
+        # B4 final LR anneal: in the last anneal_frac of wall-clock budget, drop
+        # LR by anneal_factor once (both default-off: anneal_frac 0).
+        el_pre = time.time() - t0
+        tr = cfg["training"]
+        if (tr.get("anneal_frac", 0) > 0 and not annealed
+                and el_pre > budget * (1.0 - tr["anneal_frac"])):
+            set_lr(base_lr * tr.get("anneal_factor", 0.1))
+            annealed = True
+            print(f"anneal: lr {base_lr} -> {base_lr * tr.get('anneal_factor', 0.1)} at el={el_pre:.0f}s")
         # Train for effective_steps
         losses = {}
         for _ in range(effective_steps):

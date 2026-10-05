@@ -21,6 +21,7 @@ template <class T> int run(const Args& a) {
   int sims[2] = {(int)a.num("sims-a", 400), (int)a.num("sims-b", 100)};
   float cpuct[2] = {(float)a.dbl("cpuct-a", 1.5), (float)a.dbl("cpuct-b", 1.5)};
   float lcb[2] = {(float)a.dbl("lcb-a", 0), (float)a.dbl("lcb-b", 0)};
+  float ptemp[2] = {(float)a.dbl("prior-temp-a", 1.0), (float)a.dbl("prior-temp-b", 1.0)};
   std::unique_ptr<Evaluator<G>> ev[2] = {make_evaluator<G>(evaluator_a_str, 11), make_evaluator<G>(evaluator_b_str, 22)};
   Rng rng((uint64_t)a.num("seed", 5)); int w = 0, l = 0, d = 0; int opening_plies = (int)a.num("opening-plies", 2);
   for (int g = 0; g < games; g++) {
@@ -29,6 +30,7 @@ template <class T> int run(const Args& a) {
     auto s = G::initial(); Rng orng(1000 + g / 2);
     for (int i = 0; i < opening_plies && !G::is_terminal(s); i++) { Move mv[G::kMaxMoves]; int n = G::legal_moves(s, mv); G::apply(s, mv[orng.below(n)]); }
     MctsConfig mc[2]; mc[0].c_puct = cpuct[0]; mc[1].c_puct = cpuct[1];
+    mc[0].prior_temp = ptemp[0]; mc[1].prior_temp = ptemp[1];
     MCTS<G> tree[2] = {MCTS<G>(mc[0]), MCTS<G>(mc[1])};
     tree[0].set_root(s); tree[1].set_root(s);
     while (!G::is_terminal(s)) {

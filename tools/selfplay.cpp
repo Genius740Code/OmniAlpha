@@ -23,6 +23,9 @@ template <class T> int run(const Args& a) {
   cfg.mcts.gumbel = (int)a.num("gumbel", 0) != 0;
   cfg.mcts.gumbel_sims = (int)a.num("gumbel-sims", 32);
   cfg.value_lambda = (float)a.dbl("value-lambda", 0.1);
+  cfg.mcts.prior_temp = (float)a.dbl("prior-temp", 1.0);
+  cfg.resign_q = (float)a.dbl("resign-q", -2.0);
+  cfg.resign_min_plies = (int)a.num("resign-min-plies", 10);
   std::string ev_spec = a.str("evaluator", "rollout"); uint64_t seed = (uint64_t)a.num("seed", 1);
   SampleWriter<G> writer(a.str("out", "selfplay.bin").c_str());
   if (!writer.ok()) { std::fprintf(stderr, "cannot open output\n"); return 1; }
