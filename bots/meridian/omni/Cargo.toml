@@ -1,0 +1,21 @@
+[package]
+name = "omni"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+[lib]
+# cdylib is the WebAssembly module; rlib lets other Rust code, such as tests, use the crate.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+meridian-engine = { path = "../engine" }
+serde_json = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+
+# Keeps Scout out of any enclosing Cargo workspace.
+[workspace]

@@ -3,6 +3,9 @@ build/
 build-*/
 cmake-build-*/
 
+# Rust build output (keep the shipped bots/meridian/omni.wasm artifact)
+bots/meridian/omni/target/
+
 # Compiled objects / binaries
 *.o
 *.so

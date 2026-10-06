@@ -1,0 +1,10 @@
+[package]
+name = "meridian-engine"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Exact rules engine for the game Meridian."
+license = "UNLICENSED"
+publish = false
+
+[workspace]
