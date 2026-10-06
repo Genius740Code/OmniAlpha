@@ -16,21 +16,28 @@ search shape, tuned parameters. Upload file: **`omni.wasm`** (266KB, limit 8MB).
 - `omni.wasm` — the built upload artifact.
 - `RULES.md` — the rules.
 
-## Training (parameter search, done 2026-10-06)
+## Training (parameter search, 1-hour run 2026-10-06)
 
 `tune` plays baseline (Scout defaults) vs each candidate, alternating colors,
-candidate point of view. Budgets are reduced for speed; winners re-checked higher.
+candidate point of view. The pre-1h tuner was deterministic (same 2 lines
+replayed), so it was fixed first: every game now starts from 6 random opening
+moves from a seeded RNG (`--openings/--seed`), giving independent games.
 
-| round | budget | games/pairing | result (candidate view) |
-|---|---|---|---|
-| 1 | 128 | 2 | width12 1-1, width6 0-2, horizon8 0-2, horizon16 1-1, room0.2 0-2, room0.6 1-1 |
-| 2 | 512 | 4 | width12 **0-4**, width6 2-2, horizon8 2-2, horizon16 2-2, room0.2 2-2, room0.6 2-2 |
-| 3 | 1024 | 8 | width12 4-4, width6 4-4, **horizon8 0-8**, horizon16 4-4, room0.2 4-4, **room0.6 0-8** |
+| round | budget | games/pairing | seed | result (candidate view) |
+|---|---|---|---|---|
+| 1 (screen) | 2048 | 80 | 1 | width12 43-37, width16 43-37, horizon10 43-37, rest 38-42…42-38 — except **room0.0 24-56** |
+| 2 (verify) | 4096 (=`MOVE_BUDGET`) | 40 | 2 | width12 23-17, rest ≈20-20 — except width6 13-27, width4 12-28, room0.6 15-25, **room0.0 10-30** |
 
-Killed: `horizon 8` (0-8) and `room_weight 0.6` (0-8) — both decisive at n=8.
-The width12 0-4 at round 2 did not reproduce (4-4 at round 3): noise.
-**Conclusion: Scout defaults (width 8, horizon 12, room 0.4) confirmed; shipped
-unchanged.** The bot plays at Scout strength under our name/ratings.
+Log: `/tmp/opencode/meridian-1h.log` (~42 min compute on 2 cores).
+
+Killed: `room_weight 0.0` (combined 34-86 over 120 — no room term loses
+decisively at both budgets). Narrow widths hurt at full budget (width6/width4
+a combined 25-55 in round 2). Nothing beats Scout defaults significantly:
+best is width12 at 66-54 combined (+6 over 60-60, ~1σ, n=120) — noise.
+**Conclusion unchanged: Scout defaults (width 8, horizon 12, room 0.4)
+confirmed; `omni.wasm` ships with them.** Earlier rounds (deterministic
+openings, kept for history): horizon8 0-8 and room0.6 0-8 at n=8 did not
+reproduce with diverse openings.
 
 Why not a neural net: Meridian's policy space is 17,328 move IDs with
 thousands of legal moves per position — AlphaZero-style training on CPU for an
