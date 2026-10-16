@@ -40,6 +40,7 @@ SearchReport adaptive_search(MCTS<G>& mcts, Evaluator<G>& ev, const SearchLimits
     if (sims >= L.max_simulations) break;
     if (sims < L.min_simulations) continue;
     if (mcts.root_proven() == 1) { r.early_stop = true; break; }  // proven win: play it now
+    if (mcts.root_proven() == -1 || mcts.root_proven() == 2) { r.early_stop = true; break; }  // proven loss/draw: outcome fixed, save sims
     bool stable = (sims - last_change) >= 0.5 * sims;          // leader unchanged for last half of search
     bool contested = s2 > 0.6 * b;                              // runner-up close
     bool uncertain = !stable || contested;

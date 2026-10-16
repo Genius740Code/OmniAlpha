@@ -2,7 +2,7 @@
 Selfplay (C++ binary) -> replay buffer -> train -> timed checkpoints -> TorchScript export.
 Arena vs champion when possible; otherwise promotes latest. Tracks Elo vs wall-clock in log.jsonl.
 Usage: python -m gai.orchestrator --config configs/competition_60m.yaml --game connect4 [--minutes 2]"""
-import argparse, json, os, subprocess, time, yaml, torch
+import argparse, json, math, os, subprocess, time, yaml, torch
 import torch.nn.functional as F
 from .data import read_samples, ReplayBuffer, split_held_out
 
@@ -64,6 +64,7 @@ def main():
                "--prior-temp", str(sp.get("prior_temp", 1.0)),
                "--resign-q", str(sp.get("resign_q", -2.0)),
                "--resign-min-plies", str(sp.get("resign_min_plies", 10)),
+               "--resign-probe", str(sp.get("resign_probe", 0.0)),
                "--batch", str(sp.get("batch", 1)),
                "--dirichlet", str(sp.get("dirichlet", 0.3)),
                "--temp-moves", str(sp.get("temperature_moves", 10)),
@@ -72,6 +73,14 @@ def main():
                "--lanes", str(sp.get("lanes", 1))]
         # threads "auto" (or absent) = let the tool default to hardware_concurrency;
         # atol("auto")==0 would spawn zero workers, so only forward numeric values.
+        # NOTE: fallback path below must mirror this (thread-count drift = oversubscription).
+        def _maybe_add_threads(cmd):
+            try:
+                int(sp.get("threads", "auto"))
+                cmd += ["--threads", str(sp["threads"])]
+            except (ValueError, TypeError, KeyError):
+                pass
+            return cmd
         try:
             int(sp.get("threads", "auto"))
             cmd += ["--threads", str(sp["threads"])]
@@ -88,7 +97,7 @@ def main():
                 nn_ok = False
                 print(f"nn evaluator failed, falling back: {e}")
                 ev = sp.get("evaluator", "rollout")
-                stats = sh_json([f"{a.build}/selfplay", "--game", a.game, "--games", str(sp["games_per_iter"]),
+                fb = [f"{a.build}/selfplay", "--game", a.game, "--games", str(sp["games_per_iter"]),
                                  "--sims", str(sp["simulations"]), "--out", data, "--evaluator", ev, "--seed", str(it + 1),
                                  "--full-prob", str(sp.get("full_prob", 1.0)), "--cheap-frac", str(sp.get("cheap_frac", 0.125)),
                                  "--forced", str(sp.get("forced", 1)), "--prune", str(sp.get("prune", 1)),
@@ -98,12 +107,15 @@ def main():
                                  "--prior-temp", str(sp.get("prior_temp", 1.0)),
                                  "--resign-q", str(sp.get("resign_q", -2.0)),
                                  "--resign-min-plies", str(sp.get("resign_min_plies", 10)),
+                                 "--resign-probe", str(sp.get("resign_probe", 0.0)),
                                  "--batch", str(sp.get("batch", 1)),
                                  "--dirichlet", str(sp.get("dirichlet", 0.3)),
                "--temp-moves", str(sp.get("temperature_moves", 10)),
                                  "--loss-fallthrough", str(sp.get("loss_fallthrough", 1)),
                                  "--gumbel-sigma-mctx", str(sp.get("gumbel_sigma_mctx", 0)),
-               "--lanes", str(sp.get("lanes", 1))])
+               "--lanes", str(sp.get("lanes", 1))]
+                fb = _maybe_add_threads(fb)
+                stats = sh_json(fb)
             else:
                 raise
         x, pi, z, shape = read_samples(data)
@@ -154,12 +166,26 @@ def main():
         fresh_positions = len(train_z)
         batch_size = cfg["training"]["batch_size"]
         max_allowed_steps = int(max_reuse_ratio * fresh_positions / batch_size)
+        # Guard: tiny batches (e.g. early iters) must still train at least 1 step
+        # when the buffer holds a full batch; 0-step iters silently stall learning.
+        if max_allowed_steps <= 0 and buf.n >= batch_size:
+            max_allowed_steps = 1
         effective_steps = min(cfg["training"]["steps_per_iter"], max_allowed_steps)
-        # B4 final LR anneal: in the last anneal_frac of wall-clock budget, drop
-        # LR by anneal_factor once (both default-off: anneal_frac 0).
+        # LR schedule: cosine decay over wall-clock budget (default when lr_schedule: cosine),
+        # else legacy one-shot drop in last anneal_frac. Cosine wins for final-checkpoint Elo.
         el_pre = time.time() - t0
         tr = cfg["training"]
-        if (tr.get("anneal_frac", 0) > 0 and not annealed
+        if tr.get("lr_schedule", "") == "cosine":
+            frac = min(1.0, el_pre / budget)
+            warm = tr.get("warmup_frac", 0.03)
+            if frac < warm and warm > 0:
+                lr_now = base_lr * (frac / warm)
+            else:
+                lr_now = base_lr * (0.02 + 0.98 * 0.5 * (1.0 + math.cos(math.pi * frac)))
+            set_lr(lr_now)
+            if int(el_pre) % 600 < 12:
+                print(f"cosine lr {lr_now:.6f} at el={el_pre:.0f}s frac={frac:.2f}")
+        elif (tr.get("anneal_frac", 0) > 0 and not annealed
                 and el_pre > budget * (1.0 - tr["anneal_frac"])):
             set_lr(base_lr * tr.get("anneal_factor", 0.1))
             annealed = True
@@ -196,11 +222,15 @@ def main():
         if el >= next_ck:
             ck = os.path.join(a.out, f"checkpoint_{int(next_ck // 60)}m.pt")
             save_checkpoint(net, ck); next_ck += ck_every
-            # Cheap sanity arena when possible (rollout evaluators on CPU): new vs random baseline
+            # Arena that actually measures the net: NN (latest.ts) vs rollout baseline.
+            # Old code compared rollout-vs-rollout (identical 16W-4L every run) so Elo never moved.
             try:
                 ev_cfg = cfg.get("eval", {})
-                arena = sh_json([f"{a.build}/evaluate", "--game", a.game, "--games", str(ev_cfg.get("games", 20)),
-                                 "--sims-a", str(ev_cfg.get("sims", 200)), "--sims-b", "50"])
+                arena_cmd = [f"{a.build}/evaluate", "--game", a.game, "--games", str(ev_cfg.get("games", 20)),
+                                 "--sims-a", str(ev_cfg.get("sims", 200)), "--sims-b", "50"]
+                if os.path.exists(latest_ts):
+                    arena_cmd += ["--evaluator-a", f"nn:{latest_ts}", "--evaluator-b", "rollout"]
+                arena = sh_json(arena_cmd)
                 log.write(json.dumps(dict(iter=it, elapsed_s=round(time.time() - t0, 1), arena_vs_weak=arena, checkpoint=ck)) + "\n"); log.flush()
             except Exception as e:
                 print(f"arena failed: {e}")

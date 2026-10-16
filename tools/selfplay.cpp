@@ -28,6 +28,7 @@ template <class T> int run(const Args& a) {
   cfg.mcts.loss_fallthrough = (int)a.num("loss-fallthrough", 1) != 0;
   cfg.resign_q = (float)a.dbl("resign-q", -2.0);
   cfg.resign_min_plies = (int)a.num("resign-min-plies", 10);
+  cfg.resign_probe = (float)a.dbl("resign-probe", 0.0);
   cfg.lanes = std::max(1, (int)a.num("lanes", 1));
   if (cfg.lanes > 1 && cfg.mcts.gumbel) {
     std::fprintf(stderr, "lanes>1 with gumbel: falling back to per-game (Gumbel has own batching)\n");
@@ -38,7 +39,14 @@ template <class T> int run(const Args& a) {
   if (!writer.ok()) { std::fprintf(stderr, "cannot open output\n"); return 1; }
   std::atomic<int> next{0}, done{0}; std::atomic<long> positions{0}, w0{0}, w1{0}, dr{0}; auto t0 = std::chrono::steady_clock::now();
   auto worker = [&](int tid) {
-    Rng rng(seed * 1000003 + tid); auto ev = make_evaluator<G>(ev_spec, seed * 77 + tid);
+    Rng rng(seed * 1000003 + tid);
+    // Cache-by-default: transpositions + tree reuse hit often (Connect4 board-only hash);
+    // per-worker cache so no locking; explicit cache: specs pass through untouched.
+    auto mk = [&](const std::string& spec, uint64_t sd) {
+      if (spec.rfind("cache", 0) == 0 || spec == "uniform") return make_evaluator<G>(spec, sd);
+      return std::unique_ptr<Evaluator<G>>(new CachingEvaluator<G>(make_evaluator<G>(spec, sd), 1u << 18));
+    };
+    auto ev = mk(ev_spec, seed * 77 + tid);
     auto count = [&](const GameRecord<G>& rec) {
       writer.write(rec);
       positions += (long)rec.samples.size(); done++;

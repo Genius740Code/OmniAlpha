@@ -26,8 +26,9 @@ struct SelfPlayConfig {
   int cheap_min_sims = 10;
   float value_lambda = 0.1f;      // soft-Z: blend outcome with search Q [0,1]
                                   // (matches tools/selfplay --value-lambda and orchestrator defaults)
-  float resign_q = -2.0f;         // resign when full-search root_value < this; <=-1.5 disables
+  float resign_q = -2.0f;         // resign when best child Q < this; <=-1.5 disables
   int resign_min_plies = 10;      // don't resign before this many plies
+  float resign_probe = 0.0f;      // fraction of hopeless positions to play on (calibration: measures false-resign rate)
   int lanes = 1;                  // lockstep games per worker (>1 batches one leaf
                                   // per game into a single evaluator call; no virtual
                                   // loss, unchanged per-tree semantics; non-Gumbel only)
@@ -64,7 +65,7 @@ template <GameLike G> bool find_block_in_1(const typename G::State& s, Move* out
   for (int i = 0; i < n; i++) {
     auto t = s;
     G::apply(t, mv[i]);
-    if (G::is_terminal(t)) { safe++; last_safe = mv[i]; continue; }  // our own terminal: keep as candidate
+    if (G::is_terminal(t)) { continue; }  // own terminal here is non-winning (win-in-1 already false): not a safe block
     if (!find_win_in_1<G>(t, &win)) { safe++; last_safe = mv[i]; }
   }
   if (safe == 1) { *out = last_safe; return true; }
@@ -136,9 +137,10 @@ GameRecord<G> play_selfplay_game(const SelfPlayConfig& cfg, Evaluator<G>& ev, Rn
       m = mcts.sample_move(rec.plies < cfg.temperature_moves ? cfg.temperature : 0.f, rng);
     }
     sm.q = mcts.root_value();  // search root-value at move time, for value-target mixing
-    // Resignation: hopeless full-search positions end now; loser = player to move.
+    // Calibrated resignation: hopeless full-search positions end now (probe fraction plays on
+    // to measure the false-resign rate); loser = player to move.
     if (!resigned && cfg.resign_q > -1.5f && full && rec.plies >= cfg.resign_min_plies
-        && mcts.root_value() < cfg.resign_q) {
+        && mcts.best_child_q() < cfg.resign_q && rng.uniform() >= cfg.resign_probe) {
       resigned = true; resign_loser = sm.player;
       rec.samples.push_back(std::move(sm));
       break;
@@ -259,7 +261,7 @@ std::vector<GameRecord<G>> play_selfplay_lanes(const SelfPlayConfig& cfg, Evalua
       Move m = t.m.sample_move(t.rec.plies < cfg.temperature_moves ? cfg.temperature : 0.f, rng);
       t.sm.q = t.m.root_value();
       if (!t.resigned && cfg.resign_q > -1.5f && t.full && t.rec.plies >= cfg.resign_min_plies
-          && t.m.root_value() < cfg.resign_q) {
+          && t.m.best_child_q() < cfg.resign_q && rng.uniform() >= cfg.resign_probe) {
         t.resigned = true; t.resign_loser = t.sm.player;
         t.rec.samples.push_back(std::move(t.sm));
         finalize(t); alive--;

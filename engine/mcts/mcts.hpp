@@ -170,6 +170,12 @@ template <GameLike G> class MCTS {
     for (int i = 0; i < num_root_children(); i++) { const Node& c = nodes_[nodes_[root_].first_child + i]; w += c.w; n += c.n; }
     return n ? w / n : 0.f;
   }
+  float best_child_q() const {  // max child Q (chooser view); for calibrated resign
+    if (!root_expanded() || num_root_children() <= 0) return 0.f;
+    float b = -2.f;
+    for (int i = 0; i < num_root_children(); i++) b = std::max(b, child_q(i));
+    return b;
+  }
   Move best_move() const {
     int bi = 0; for (int i = 1; i < num_root_children(); i++) if (child_visits(i) > child_visits(bi)) bi = i;
     return child_move(bi);

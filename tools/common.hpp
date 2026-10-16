@@ -45,10 +45,27 @@ template <class F> int dispatch_game(const std::string& name, F&& f) {
   return 2;
 }
 
-// --evaluator uniform|rollout[:N]  (nn:<path> supported when GAI_LIBTORCH=ON)
+// --evaluator uniform|rollout[:N]|cache[:CAP]:<inner>|cache:<inner>  (nn:<path> supported when GAI_LIBTORCH=ON)
 template <gai::GameLike G> std::unique_ptr<gai::Evaluator<G>> make_evaluator(const std::string& spec, uint64_t seed) {
   if (spec == "uniform") return std::make_unique<gai::UniformEvaluator<G>>();
   if (spec.rfind("rollout", 0) == 0) { int n = spec.size() > 8 ? std::atoi(spec.c_str() + 8) : 1; return std::make_unique<gai::RolloutEvaluator<G>>(n > 0 ? n : 1, seed); }
+  if (spec.rfind("cache", 0) == 0) {
+    // cache:<inner> or cache:<cap>:<inner>  e.g. cache:rollout, cache:65536:nn:model.ts
+    std::string rest = spec.size() > 5 && spec[5] == ':' ? spec.substr(6) : "";
+    size_t cap = 1 << 16;
+    auto c = rest.find(':');
+    if (c != std::string::npos) {
+      long maybe = std::atol(rest.substr(0, c).c_str());
+      if (maybe > 0 && (rest.substr(c + 1, 3) == "nn:" || rest.substr(c + 1, 7) == "hybrid:" ||
+                        rest.substr(c + 1, 7) == "rollout" || rest.substr(c + 1, 7) == "uniform" ||
+                        rest.substr(c + 1, 6) == "cache:" || rest.substr(c + 1, 10) == "nn-strict:")) {
+        cap = (size_t)maybe;
+        rest = rest.substr(c + 1);
+      }
+    }
+    if (rest.empty()) rest = "rollout";
+    return std::make_unique<gai::CachingEvaluator<G>>(make_evaluator<G>(rest, seed), cap);
+  }
 #ifdef GAI_LIBTORCH
   if (spec.rfind("nn-strict:", 0) == 0) {
     std::string path = spec.substr(10);

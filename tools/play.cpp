@@ -25,6 +25,7 @@ template <class T> int run(const Args& a) {
   if (timed) { double base = 0, inc = 0; std::sscanf(a.str("tc").c_str(), "%lf+%lf", &base, &inc); clock_ms[0] = clock_ms[1] = base * 1000; inc_ms = inc * 1000; }
   SearchLimits L; L.min_simulations = (int)a.num("min-sims", 200); L.target_simulations = (int)a.num("sims", 1000); L.max_simulations = (int)a.num("max-sims", 20000);
   L.batch = (int)a.num("batch", 1);
+  float lcb_beta = (float)a.dbl("lcb", 0);
   MCTS<G> tree; auto s = G::initial(); tree.set_root(s); int ply = 0;
   while (!G::is_terminal(s)) {
     int p = G::current_player(s); std::cout << "\n" << G::to_string(s) << "player " << p << " (" << kind[p] << ")\n";
@@ -42,7 +43,8 @@ template <class T> int run(const Args& a) {
       }
       auto t0 = std::chrono::steady_clock::now();
       if (!tree.root_expanded()) tree.run(1, *ev, 1);
-      auto rep = adaptive_search<G>(tree, *ev, l); m = rep.best;
+      auto rep = adaptive_search<G>(tree, *ev, l);
+      m = lcb_beta > 0 ? tree.best_move_lcb(lcb_beta) : rep.best;
       double used = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
       if (timed) { clock_ms[p] = clock_ms[p] - used + inc_ms; if (clock_ms[p] <= 0) { std::cout << "player " << p << " LOST ON TIME\n"; return 0; } }
       std::cout << "mcts: move " << m << " sims " << rep.sims << " ms " << (int)used << " value " << rep.root_value << (rep.early_stop ? " [early]" : "") << (rep.extended ? " [extended]" : "") << "\n";

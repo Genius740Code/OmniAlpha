@@ -1,0 +1,20 @@
+# 60-min Connect4 v2-smart: cosine LR + calibrated resign + cache-default + global-pool value head.
+# Goal: very strong bot, fastest Elo/min on 2-CPU + CPU-libtorch.
+budget_minutes: 60
+checkpoint: {interval_minutes: 10}
+selfplay: {games_per_iter: 24, simulations: 150, evaluator: rollout, threads: 2,
+  temperature_moves: 10, dirichlet: 0.3, full_prob: 0.25, cheap_frac: 0.15,
+  forced: 1, prune: 1, shortcuts: 1, augment: true, value_lambda: 0.1,
+  hybrid: 1, nn_start_iter: 5, nn_anneal_iters: 40,
+  batch: 8, lanes: 8, nn_strict: 1,
+  resign_q: -0.92, resign_min_plies: 10, resign_probe: 0.10}
+network: {type: resnet, channels: 32, blocks: 3}
+training: {lr: 0.002, lr_schedule: cosine, warmup_frac: 0.03, weight_decay: 0.0001,
+  batch_size: 256, steps_per_iter: 30,
+  replay_capacity: 60000, mixed_precision: false, max_reuse_ratio: 8.0,
+  value_weight: 1.5}
+race: {enabled: false, fraction_of_budget: 0.15, candidates: [{type: resnet, channels: 32, blocks: 3}]}
+eval: {games: 20, sims: 100, promote_if_elo_gain_over: 0, min_confidence_games: 50}
+clock: {minimum_think_ms: 0, maximum_think_ms: 30000, safety_margin_ms: 100, emergency_ms: 1000}
+search: {min_simulations: 150, target_simulations: 150, max_simulations: 150}
+logging: {dir: logs, format: jsonl}

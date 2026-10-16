@@ -19,13 +19,16 @@ class Block(nn.Module):
 class ResNet(nn.Module):
     def __init__(self, planes, h, w, actions, channels=64, blocks=4):
         super().__init__()
+        self.h, self.w, self.channels = h, w, channels
         self.stem = nn.Sequential(nn.Conv2d(planes, channels, 3, padding=1, bias=False), nn.BatchNorm2d(channels), nn.ReLU())
         self.blocks = nn.Sequential(*[Block(channels) for _ in range(blocks)])
         self.pconv = nn.Sequential(nn.Conv2d(channels, 2, 1), nn.BatchNorm2d(2), nn.ReLU()); self.pfc = nn.Linear(2 * h * w, actions)
-        self.vconv = nn.Sequential(nn.Conv2d(channels, 1, 1), nn.BatchNorm2d(1), nn.ReLU()); self.vfc1 = nn.Linear(h * w, 64); self.vfc2 = nn.Linear(64, 1)
+        self.vconv = nn.Sequential(nn.Conv2d(channels, 2, 1), nn.BatchNorm2d(2), nn.ReLU()); self.vfc1 = nn.Linear(2 * h * w + 2 * channels, 64); self.vfc2 = nn.Linear(64, 1)
     def forward(self, x):
         z = self.blocks(self.stem(x)); p = self.pfc(self.pconv(z).flatten(1))
-        v = torch.tanh(self.vfc2(F.relu(self.vfc1(self.vconv(z).flatten(1))))).squeeze(-1); return p, v
+        gv = torch.cat([z.mean(dim=(2, 3)), z.amax(dim=(2, 3))], dim=1)
+        vv = torch.cat([self.vconv(z).flatten(1), gv], dim=1)
+        v = torch.tanh(self.vfc2(F.relu(self.vfc1(vv)))).squeeze(-1); return p, v
 
 def build(cfg, planes, h, w, actions):
     t = cfg.get("type", "mlp"); kw = {k: v for k, v in cfg.items() if k != "type"}
