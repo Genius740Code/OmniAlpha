@@ -85,9 +85,9 @@ template <GameLike G> class MCTS {
       Node& ln = nodes_[l.node];
       if (ln.first_child < 0) {
         float vm = (ln.mover == P || ln.mover < 0) ? v : -v;
-        // Root terminal: proven from player-to-move view; else from mover view.
-        if (l.node == root_) ln.proven = (vm > 0 ? (int8_t)1 : vm < 0 ? (int8_t)-1 : (int8_t)2);
-        else ln.proven = (vm > 0 ? (int8_t)1 : vm < 0 ? (int8_t)-1 : (int8_t)2);
+        // The if/else here previously duplicated the identical body; proven
+        // is always mover-view in finish_leaf (see backup() for the root pass).
+        ln.proven = (vm > 0 ? (int8_t)1 : vm < 0 ? (int8_t)-1 : (int8_t)2);
       }
     } else {
       v = r->value;
@@ -316,9 +316,15 @@ template <GameLike G> class MCTS {
     // MCTS-Solver propagation. proven is from the view of Node::mover:
     // child mover == player to move at parent, so child +1 (win for chooser)
     // means parent -1 (loss for parent mover), and vice versa. Draws pass through.
+    // Early stop: a parent's proven depends only on its children's proven
+    // values, so once a node's proven is unchanged after recomputation, no
+    // ancestor can change either -- stop rescanning (audit B4). One simulation
+    // can flip at most one proven value (plus cascades through it), so this is
+    // exact, not approximate.
     for (int x = node; x >= 0; x = nodes_[x].parent) {
       Node& n = nodes_[x];
       if (n.first_child < 0) continue;  // unexpanded: keep current proven (terminal set in finish_leaf)
+      int8_t prev = n.proven;
       bool any_win_for_chooser = false, all_loss_for_chooser = true, all_proven = true;
       for (int i = 0; i < n.nchild; i++) {
         int8_t cp = nodes_[n.first_child + i].proven;
@@ -338,6 +344,7 @@ template <GameLike G> class MCTS {
         else if (all_proven) n.proven = 2;
         else n.proven = 0;
       }
+      if (n.proven == prev) break;
     }
   }
   void compact() {  // copy the live subtree into a fresh pool (BFS)
