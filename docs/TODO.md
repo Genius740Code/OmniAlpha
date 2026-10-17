@@ -39,11 +39,13 @@ Rule: one change at a time behind flags; A/B at equal wall-clock; kill on SPRT f
 
 ## TODO, ranked
 
-1. [ ] **Serve-side free Elo** — max-sim serving, checkpoint ensemble (last 3),
-     LCB move pick (A6 from external audit), value-swing time management. Zero
-     retraining. Goal: convert the +52 Elo at 320s vs rollout-200 into real serve
-     Elo gain. **Priority: critical — the +52 Elo at 320s is the first time we've
-     beaten rollout-200; serving can amplify this.**
+1. [~] **Serve-side free Elo** — max-sim serving ✅ (`evaluate --max-sims`, 6x headroom,
+     flat for SPRT gates), checkpoint ensemble ✅ (`ensemble:a+b+c` spec +
+     `EnsembleEvaluator`, `tests/test_ensemble.cpp`), LCB move pick ✅ (`play --lcb`),
+     SPRT champion gate ✅ (`python/gai/sprt.py`, `sprt_arena_gate` + `promote_decision`
+     in `orchestrator.py`, `pick_champion.py` → `results/CHAMPION.md`). Zero retraining.
+     Remaining: value-swing time management.
+     Verified: self-ensemble == 0 Elo (no-op); ensemble vs single ≥0 at 40 games @100 sims.
 
 2. [ ] **Gumbel σ rescale** — normalize sigma spread to logit spread (verify
      `mctx` qtransform), then stage-1 suite test at 8-128 sims. Kill on no suite
@@ -53,9 +55,10 @@ Rule: one change at a time behind flags; A/B at equal wall-clock; kill on SPRT f
      net+rollout blend on `build-lt`. Value-mixing already shifts the numbers
      significantly (+52 at 320s).
 
-4. [ ] **Data diversity** — endgame-first curriculum, archive starts, resign +
-     calibration, longer tempering, dedup/downweight duplicates. Needs the ruler
-     first.
+4. [~] **Data diversity** — endgame-first curriculum, archive starts, resign +
+     calibration ✅ (`--resign-q -0.92` on `best_child_q` + `resign_probe`),
+     recency-weighted replay ✅ (`training.recency_weight`, `ReplayBuffer.sample`),
+     longer tempering, dedup/downweight duplicates.
 
 5. [ ] **Throughput** — lane-batched cross-game GPU inference, GPU-resident
      replay, batch-vs-quality curve. Gate: >=8x positions/s at <10 Elo cost.

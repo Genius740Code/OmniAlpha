@@ -1,4 +1,5 @@
-// ./build/selfplay --game NAME --games N --sims S --out data.bin [--threads T] [--evaluator uniform|rollout[:N]] [--seed X]
+// ./build/selfplay --game NAME --games N --sims S --out data.bin [--threads T] [--seed X]
+//   [--evaluator uniform|rollout[:N]|ensemble:<a>+<b>+...|cache[:CAP]:<inner>]
 //   [--batch B] [--dirichlet 0.3] [--temp-moves 10]       Prints one JSON summary line.
 // Each thread runs independent games with its own tree (batching across games on a shared GPU queue is a TODO).
 #include <atomic>

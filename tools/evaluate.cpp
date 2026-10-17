@@ -1,6 +1,7 @@
 // ./build/evaluate --game NAME [--games 100] [--sims-a 400] [--sims-b 100] [--evaluator-a rollout] [--evaluator-b rollout]
-// Arena: player A vs B (colors alternate). Reports W/L/D, Elo of A over B and 95% CI as JSON.
-// Model files (--model X.pt) are a TODO: wire NNEvaluator in make_evaluator (tools/common.hpp), see docs/HANDOFF.md.
+//   [--max-sims N] (early-stop headroom; default 6x sims) [--seed S] (opening set)
+//   evaluators: uniform|rollout[:N]|nn:<path>|ensemble:<a>+<b>+...|cache[:CAP]:<inner>
+// Arena: player A vs B (colors alternate, paired openings). Reports W/L/D, Elo of A over B and 95% CI as JSON.
 #include <atomic>
 #include <thread>
 #include <vector>
@@ -46,7 +47,9 @@ template <class T> int run(const Args& a) {
       int a_is = g & 1;  // which player id A takes
       // randomized opening with paired colors: same opening (seed 1000+g/2) is reused for the
       // g and g^1 pair so each opening is played from both colors (variance reduction).
-      auto s = G::initial(); Rng orng(1000 + g / 2);
+      // --seed offsets the opening set so independent arena batches (e.g. SPRT) are not
+      // re-playing the same games when invoked repeatedly with the same --games.
+      auto s = G::initial(); Rng orng((uint64_t)a.num("seed", 5) * 100003ull + 1000 + g / 2);
       for (int i = 0; i < opening_plies && !G::is_terminal(s); i++) { Move mv[G::kMaxMoves]; int n = G::legal_moves(s, mv); G::apply(s, mv[orng.below(n)]); }
       MCTS<G> tree[2] = {MCTS<G>(mc[0]), MCTS<G>(mc[1])};
       tree[0].set_root(s); tree[1].set_root(s);
