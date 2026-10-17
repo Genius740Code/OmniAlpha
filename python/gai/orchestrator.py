@@ -123,9 +123,13 @@ def main():
         # Hold-out split BEFORE augmentation: augmenting first makes held-out
         # positions mirror twins of training positions (audit #8). Split raw,
         # then augment the train portion only.
+        # holdout_frac is configurable (audit C1): the held-out split is thrown
+        # away from training every iteration, so 10% of self-play data was
+        # burned by default. Default stays 0.1 for backward compatibility;
+        # competition configs set 0.02.
         (train_x, train_pi, train_z, train_full,
          holdout_x, holdout_pi, holdout_z, holdout_full) = split_held_out(
-             x, pi, z, full, holdout_frac=0.1)
+             x, pi, z, full, holdout_frac=cfg["training"].get("holdout_frac", 0.1))
         if sp.get("augment", False):
             from .data import maybe_mirror_batch
             train_x, train_pi, train_z, train_full = maybe_mirror_batch(
@@ -143,19 +147,28 @@ def main():
             base_lr = tr["lr"]
             annealed = False
         # (split already done above, before augmentation)
-        # Evaluate network on held-out data for monitoring
+        # Evaluate network on held-out data for monitoring.
+        # Audit C1: the policy metric uses full-search samples only -- the
+        # training loss masks cheap-search positions (policy_pruning), so
+        # including them made the monitor read high for reasons unrelated
+        # to progress.
         net.eval()
         device = next(net.parameters()).device
         with torch.no_grad():
-            holdout_x_t = torch.as_tensor(holdout_x, device=device)
-            holdout_pi_t = torch.as_tensor(holdout_pi, device=device)
-            holdout_z_t = torch.as_tensor(holdout_z, device=device)
-            logits_ho, v_ho = net(holdout_x_t)
-            # Policy cross-entropy (average over held-out samples, uniform weights)
-            per = -(holdout_pi_t * F.log_softmax(logits_ho.float(), -1)).sum(-1)
-            heldout_policy_loss = per.mean().item()
-            # Value MSE
-            heldout_value_mse = F.mse_loss(v_ho.squeeze(), holdout_z_t).item()
+            holdout_full_mask = torch.as_tensor(holdout_full == 1.0, device=device)
+            if int(holdout_full_mask.sum().item()) > 0:
+                holdout_x_t = torch.as_tensor(holdout_x, device=device)[holdout_full_mask]
+                holdout_pi_t = torch.as_tensor(holdout_pi, device=device)[holdout_full_mask]
+                holdout_z_t = torch.as_tensor(holdout_z, device=device)[holdout_full_mask]
+                logits_ho, v_ho = net(holdout_x_t)
+                # Policy cross-entropy (average over held-out samples, uniform weights)
+                per = -(holdout_pi_t * F.log_softmax(logits_ho.float(), -1)).sum(-1)
+                heldout_policy_loss = per.mean().item()
+                # Value MSE
+                heldout_value_mse = F.mse_loss(v_ho.squeeze(), holdout_z_t).item()
+            else:
+                heldout_policy_loss = float("nan")
+                heldout_value_mse = float("nan")
         # Add only train portion to replay buffer
         buf.add(train_x, train_pi, train_z, train_full)
         # Update-to-data ratio control: clamp steps_per_iter so

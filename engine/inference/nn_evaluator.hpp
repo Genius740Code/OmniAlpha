@@ -34,6 +34,8 @@ struct NNEvaluator : Evaluator<G> {
   explicit NNEvaluator(std::string path, bool strict = false)
       : model_path_(std::move(path)), strict_(strict) {}
 
+  // One instance per thread (tools build one per worker; CachingEvaluator has
+  // no mutex), so the reused member batch below is not shared across threads.
   void evaluate(const typename G::State* states, EvalResult<G>* out, int count) override {
     if (!loaded_) try_load();
     if (!module_) { silent_fallback(states, out, count, "load"); return; }
@@ -41,15 +43,23 @@ struct NNEvaluator : Evaluator<G> {
     const int PW = P * H * W;
     try {
       torch::NoGradGuard ng;
-      at::Tensor batch = torch::zeros({count, P, H, W}, torch::kFloat32);
-      float* bptr = batch.data_ptr<float>();
+      // Reuse the CPU staging buffer across calls (per-call alloc was the
+      // dominant fixed cost at small batch sizes). Resized+re-zeroed only when
+      // needed. On CUDA this is then copied to the device in one shot; raw
+      // memcpy into device memory would be invalid.
+      if (!staging_.defined() || staging_.size(0) != count || staging_.size(1) != P
+          || staging_.size(2) != H || staging_.size(3) != W)
+        staging_ = torch::zeros({count, P, H, W}, torch::kFloat32);
+      else
+        staging_.zero_();
+      float* bptr = staging_.data_ptr<float>();
       std::vector<float> enc(PW);
       Move mv[G::kMaxMoves];
       for (int i = 0; i < count; i++) {
         G::encode(states[i], enc.data());
         std::memcpy(bptr + (size_t)i * PW, enc.data(), sizeof(float) * PW);
       }
-      std::vector<torch::jit::IValue> inputs{batch};
+      std::vector<torch::jit::IValue> inputs{device_ == torch::kCPU ? staging_ : staging_.to(device_)};
       auto outv = module_->forward(inputs);
       at::Tensor logits, val;
       if (outv.isTuple()) {
@@ -59,6 +69,11 @@ struct NNEvaluator : Evaluator<G> {
       } else {
         silent_fallback(states, out, count, "non-tuple");
         return;
+      }
+      // Host-side reads need the outputs on CPU (no-op on the CPU path).
+      if (device_ != torch::kCPU) {
+        logits = logits.to(torch::kCPU).contiguous();
+        val = val.to(torch::kCPU).contiguous();
       }
       const float* lp = logits.data_ptr<float>();
       const float* vp = val.data_ptr<float>();
@@ -79,7 +94,9 @@ struct NNEvaluator : Evaluator<G> {
         }
         out[i].value = vv > 1.f ? 1.f : vv < -1.f ? -1.f : vv;
       }
-    } catch (const std::exception&) {
+    } catch (const std::exception& e) {
+      if (fallbacks_ < 5)
+        std::fprintf(stderr, "NNEvaluator: evaluate exception: %s\n", e.what());
       silent_fallback(states, out, count, "exception");
     }
   }
@@ -89,8 +106,17 @@ struct NNEvaluator : Evaluator<G> {
   void try_load() {
     loaded_ = true;
     try {
+      // Device selection: GAI_NN_DEVICE=cuda loads the module on GPU
+      // (audit B1). Default stays CPU so existing runs are unchanged; if CUDA
+      // is requested but unavailable we warn and fall back to CPU.
+      torch::Device dev = torch::kCPU;
+      if (const char* d = std::getenv("GAI_NN_DEVICE"); d && std::strcmp(d, "cuda") == 0) {
+        if (torch::cuda::is_available()) dev = torch::kCUDA;
+        else std::fprintf(stderr, "NNEvaluator: GAI_NN_DEVICE=cuda but CUDA is unavailable; using CPU\n");
+      }
+      device_ = dev;
       module_ = std::make_shared<torch::jit::script::Module>(
-          torch::jit::load(model_path_, torch::kCPU));
+          torch::jit::load(model_path_, dev));
       module_->eval();
     } catch (const std::exception& e) {
       std::fprintf(stderr, "NNEvaluator: cannot load '%s' (%s); falling back to uniform\n",
@@ -123,6 +149,8 @@ struct NNEvaluator : Evaluator<G> {
   }
   std::string model_path_;
   std::shared_ptr<torch::jit::script::Module> module_;
+  torch::Device device_ = torch::kCPU;
+  at::Tensor staging_;  // reused CPU input buffer (instance is per-thread)
   bool loaded_ = false, strict_ = false;
   long fallbacks_ = 0;
 };

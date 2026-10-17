@@ -44,5 +44,8 @@ LD_LIBRARY_PATH=<torch>/lib ./build-lt/evaluate --game connect4 \
   --evaluator-a nn:champion_a.ts --evaluator-b nn:champion_b.ts --games 100 --sims-a 200 --sims-b 200
 ```
 
+`nn:`/`nn-strict:`/`hybrid:` evaluators default to CPU; set `GAI_NN_DEVICE=cuda` in the
+environment to load the TorchScript module on GPU (falls back to CPU with a warning).
+
 Docs: `docs/HANDOFF.md` (continue here), `docs/FAST_TRAINING_IDEAS.md` (prioritized Elo/min backlog),
 `docs/ADDING_A_GAME.md`, `docs/PROJECT_SUMMARY.md`, `docs/REUSE.md` (license notes — check before copying).

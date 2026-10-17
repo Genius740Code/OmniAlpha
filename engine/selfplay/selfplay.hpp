@@ -29,6 +29,10 @@ struct SelfPlayConfig {
   float resign_q = -2.0f;         // resign when best child Q < this; <=-1.5 disables
   int resign_min_plies = 10;      // don't resign before this many plies
   float resign_probe = 0.0f;      // fraction of hopeless positions to play on (calibration: measures false-resign rate)
+  float truncate_value = 0.0f;    // value (p0 view) for games that stop at kMaxGameLength without
+                                  // being terminal (adjudicated draw by default). G::outcome() on a
+                                  // non-terminal state is meaningless, so truncation must not use it.
+                                  // Connect4 fills the board by ply 42, so this only bites long games.
   int lanes = 1;                  // lockstep games per worker (>1 batches one leaf
                                   // per game into a single evaluator call; no virtual
                                   // loss, unchanged per-tree semantics; non-Gumbel only)
@@ -151,6 +155,10 @@ GameRecord<G> play_selfplay_game(const SelfPlayConfig& cfg, Evaluator<G>& ev, Rn
   }
   if (resigned) {
     rec.outcome_p0 = (resign_loser == 0 ? -1.f : 1.f);
+  } else if (!G::is_terminal(s)) {
+    // Truncated at kMaxGameLength: outcome() of a non-terminal state is
+    // meaningless; use the adjudicated value instead (audit A2).
+    rec.outcome_p0 = cfg.truncate_value;
   } else {
     rec.outcome_p0 = G::outcome(s, 0);
   }
@@ -159,8 +167,11 @@ GameRecord<G> play_selfplay_game(const SelfPlayConfig& cfg, Evaluator<G>& ev, Rn
     // Both terms are player-to-move view (outcome(s, sm.player); q = root_value
     // from the chooser's view). NOTE: outcome(s, 0) is p0-view and would flip
     // the sign for sm.player == 1 samples -- do NOT use it here.
-    float z = resigned ? (sm.player == resign_loser ? -1.f : 1.f)
-                       : G::outcome(s, sm.player);
+    // truncate_value is p0-view, so flip the sign for player-1 samples.
+    float z;
+    if (resigned) z = (sm.player == resign_loser ? -1.f : 1.f);
+    else if (!G::is_terminal(s)) z = (sm.player == 0 ? cfg.truncate_value : -cfg.truncate_value);
+    else z = G::outcome(s, sm.player);
     sm.value = (1.f - cfg.value_lambda) * z + cfg.value_lambda * sm.q;
   }
   return rec;
@@ -177,17 +188,21 @@ template <GameLike G>
 std::vector<GameRecord<G>> play_selfplay_lanes(const SelfPlayConfig& cfg, Evaluator<G>& ev, Rng& rng, int L) {
   struct Slot {
     MCTS<G> m; typename G::State s; GameRecord<G> rec;
-    bool active = true, resigned = false; int resign_loser = -1;
+    bool active = true, resigned = false, truncated = false; int resign_loser = -1;
     bool has_sm = false, full = false; int sims_left = 0; Sample<G> sm;
   };
   std::vector<Slot> sl(L);
   for (auto& t : sl) { t.m = MCTS<G>(cfg.mcts); t.s = G::initial(); t.m.set_root(t.s); }
   auto finalize = [&](Slot& t) {
     if (t.resigned) t.rec.outcome_p0 = (t.resign_loser == 0 ? -1.f : 1.f);
+    else if (t.truncated) t.rec.outcome_p0 = cfg.truncate_value;  // non-terminal: adjudicated (audit A2)
     else t.rec.outcome_p0 = G::outcome(t.s, 0);
     for (auto& sm : t.rec.samples) {
-      float z = t.resigned ? (sm.player == t.resign_loser ? -1.f : 1.f)
-                           : G::outcome(t.s, sm.player);
+      // truncate_value is p0-view, so flip the sign for player-1 samples.
+      float z;
+      if (t.resigned) z = (sm.player == t.resign_loser ? -1.f : 1.f);
+      else if (t.truncated) z = (sm.player == 0 ? cfg.truncate_value : -cfg.truncate_value);
+      else z = G::outcome(t.s, sm.player);
       sm.value = (1.f - cfg.value_lambda) * z + cfg.value_lambda * sm.q;
     }
     t.active = false;
@@ -198,7 +213,10 @@ std::vector<GameRecord<G>> play_selfplay_lanes(const SelfPlayConfig& cfg, Evalua
     // Phase A: per-slot move prelude (identical logic to play_selfplay_game).
     for (auto& t : sl) {
       if (!t.active || t.has_sm) continue;
-      if (G::is_terminal(t.s) || t.rec.plies >= G::kMaxGameLength) { finalize(t); alive--; continue; }
+      if (G::is_terminal(t.s) || t.rec.plies >= G::kMaxGameLength) {
+        t.truncated = !G::is_terminal(t.s);
+        finalize(t); alive--; continue;
+      }
       int nm = G::legal_moves(t.s, mv);
       if (cfg.enable_shortcuts && nm == 1) {
         G::apply(t.s, mv[0]); t.rec.plies++;
