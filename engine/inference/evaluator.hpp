@@ -90,6 +90,51 @@ template <GameLike G> struct CachingEvaluator : Evaluator<G> {
   std::unordered_map<Hash, EvalResult<G>> table_;
 };
 
+// Checkpoint ensemble: mean value + averaged priors (renormalized) over N inner evaluators.
+// Serve-side variance reduction (last-k checkpoints) for zero retraining cost.
+// Members MUST be distinct model instances with no shared mutable state: each is evaluated
+// independently on every call. Priors are averaged in legal-move-index space, which is
+// consistent across members because they all evaluate the same state and G::legal_moves
+// is deterministic for a given state.
+template <GameLike G> struct EnsembleEvaluator : Evaluator<G> {
+  explicit EnsembleEvaluator(std::vector<std::unique_ptr<Evaluator<G>>> members)
+      : members_(std::move(members)) {}
+  void evaluate(const typename G::State* states, EvalResult<G>* out, int count) override {
+    if (members_.empty()) { uniform(states, out, count); return; }
+    std::vector<EvalResult<G>> acc(count), tmp(count);
+    for (auto& m : members_) {
+      m->evaluate(states, tmp.data(), count);
+      for (int i = 0; i < count; i++) {
+        int n = tmp[i].n < 0 ? 0 : (tmp[i].n > G::kMaxMoves ? G::kMaxMoves : tmp[i].n);
+        acc[i].n = n;
+        acc[i].value += tmp[i].value;
+        for (int j = 0; j < n; j++) acc[i].priors[j] += tmp[i].priors[j];
+      }
+    }
+    const float inv = 1.f / (float)members_.size();
+    for (int i = 0; i < count; i++) {
+      out[i].n = acc[i].n;
+      out[i].value = acc[i].value * inv;
+      float s = 0;
+      for (int j = 0; j < acc[i].n; j++) { acc[i].priors[j] *= inv; s += acc[i].priors[j]; }
+      if (s > 0) { for (int j = 0; j < acc[i].n; j++) out[i].priors[j] = acc[i].priors[j] / s; }
+      else { for (int j = 0; j < acc[i].n; j++) out[i].priors[j] = acc[i].n ? 1.f / (float)acc[i].n : 0.f; }
+    }
+  }
+  size_t size() const { return members_.size(); }
+
+ private:
+  void uniform(const typename G::State* states, EvalResult<G>* out, int count) {
+    Move mv[G::kMaxMoves];
+    for (int i = 0; i < count; i++) {
+      int n = G::legal_moves(states[i], mv);
+      out[i].n = n; out[i].value = 0;
+      for (int j = 0; j < n; j++) out[i].priors[j] = n ? 1.f / (float)n : 0.f;
+    }
+  }
+  std::vector<std::unique_ptr<Evaluator<G>>> members_;
+};
+
 // TODO(next agent): NNEvaluator (libtorch/TensorRT) with a dynamic-batching queue shared by MCTS workers.
 // See docs/HANDOFF.md section "GPU inference".
 }  // namespace gai

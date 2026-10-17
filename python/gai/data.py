@@ -57,5 +57,35 @@ class ReplayBuffer:
         for i in range(len(z)):
             self.x[self.pos], self.pi[self.pos], self.z[self.pos], self.full[self.pos] = x[i], pi[i], z[i], full[i]
             self.pos = (self.pos + 1) % self.cap; self.n = min(self.n + 1, self.cap)
-    def sample(self, batch, rng=np.random):
-        idx = rng.randint(0, self.n, size=batch); return self.x[idx], self.pi[idx], self.z[idx], self.full[idx]
+    def sample(self, batch, rng=np.random, recency=0.0):
+        """Draw `batch` indices and return (x, pi, z, full).
+
+        recency in [0,1] is a mixture: that fraction of the batch is drawn from the newest
+        half-window of the ring (anti-forgetting of the current policy) and the remainder
+        from the older half. So recency=0.7 means ~70% recent / ~30% older, and recency=0
+        reproduces the original uniform-over-all behaviour.
+        """
+        if self.n <= 0:
+            raise ValueError("ReplayBuffer.sample on empty buffer")
+        recency = float(recency)
+        if recency <= 0.0:
+            idx = rng.randint(0, self.n, size=batch)
+            return self.x[idx], self.pi[idx], self.z[idx], self.full[idx]
+        if recency > 1.0:
+            recency = 1.0
+        half = max(1, self.n // 2)
+        k_new = int(round(recency * batch))
+        idx = np.empty(batch, dtype=np.int64)
+        if k_new > 0:
+            # Newest `half` entries: ring slice ending at self.pos-1.
+            start = (self.pos - half) % self.cap
+            idx[:k_new] = (start + rng.randint(0, half, size=k_new)) % self.cap
+        if k_new < batch:
+            old_n = self.n - half
+            fill = batch - k_new
+            if old_n > 0:
+                old_start = (self.pos - self.n) % self.cap
+                idx[k_new:] = (old_start + rng.randint(0, old_n, size=fill)) % self.cap
+            else:  # buffer holds a single entry
+                idx[k_new:] = (self.pos - 1) % self.cap
+        return self.x[idx], self.pi[idx], self.z[idx], self.full[idx]

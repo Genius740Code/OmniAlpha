@@ -4,6 +4,7 @@
 #include <map>
 #include <memory>
 #include <string>
+#include <vector>
 #include "engine/core/api.hpp"
 #include "engine/mcts/adaptive.hpp"
 #include "engine/selfplay/selfplay.hpp"
@@ -45,10 +46,28 @@ template <class F> int dispatch_game(const std::string& name, F&& f) {
   return 2;
 }
 
-// --evaluator uniform|rollout[:N]|cache[:CAP]:<inner>|cache:<inner>  (nn:<path> supported when GAI_LIBTORCH=ON)
+// --evaluator uniform|rollout[:N]|ensemble:<a>+<b>[+...]|cache[:CAP]:<inner>  (nn:<path> supported when GAI_LIBTORCH=ON)
 template <gai::GameLike G> std::unique_ptr<gai::Evaluator<G>> make_evaluator(const std::string& spec, uint64_t seed) {
   if (spec == "uniform") return std::make_unique<gai::UniformEvaluator<G>>();
   if (spec.rfind("rollout", 0) == 0) { int n = spec.size() > 8 ? std::atoi(spec.c_str() + 8) : 1; return std::make_unique<gai::RolloutEvaluator<G>>(n > 0 ? n : 1, seed); }
+  if (spec.rfind("ensemble:", 0) == 0) {
+    // ensemble:<spec>+<spec>[+...]  e.g. ensemble:nn:a.ts+nn:b.ts+nn:c.ts
+    // '+' separates members: member specs and file paths already contain ':', so ':' is
+    // ambiguous as a separator. Each member is parsed recursively (cache:/hybrid:/nn:...).
+    std::vector<std::unique_ptr<gai::Evaluator<G>>> members;
+    std::string body = spec.substr(9);
+    size_t start = 0;
+    while (start <= body.size()) {
+      size_t plus = body.find('+', start);
+      std::string member = body.substr(start, plus == std::string::npos ? std::string::npos : plus - start);
+      if (!member.empty()) members.push_back(make_evaluator<G>(member, seed));
+      if (plus == std::string::npos) break;
+      start = plus + 1;
+    }
+    if (members.empty()) { std::fprintf(stderr, "evaluator 'ensemble:' has no members: '%s'\n", spec.c_str()); std::exit(3); }
+    if (members.size() == 1) return std::move(members[0]);
+    return std::make_unique<gai::EnsembleEvaluator<G>>(std::move(members));
+  }
   if (spec.rfind("cache", 0) == 0) {
     // cache:<inner> or cache:<cap>:<inner>  e.g. cache:rollout, cache:65536:nn:model.ts
     std::string rest = spec.size() > 5 && spec[5] == ':' ? spec.substr(6) : "";
@@ -58,7 +77,8 @@ template <gai::GameLike G> std::unique_ptr<gai::Evaluator<G>> make_evaluator(con
       long maybe = std::atol(rest.substr(0, c).c_str());
       if (maybe > 0 && (rest.substr(c + 1, 3) == "nn:" || rest.substr(c + 1, 7) == "hybrid:" ||
                         rest.substr(c + 1, 7) == "rollout" || rest.substr(c + 1, 7) == "uniform" ||
-                        rest.substr(c + 1, 6) == "cache:" || rest.substr(c + 1, 10) == "nn-strict:")) {
+                        rest.substr(c + 1, 6) == "cache:" || rest.substr(c + 1, 10) == "nn-strict:" ||
+                        rest.substr(c + 1, 9) == "ensemble:")) {
         cap = (size_t)maybe;
         rest = rest.substr(c + 1);
       }

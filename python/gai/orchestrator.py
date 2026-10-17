@@ -1,10 +1,13 @@
 """Wall-clock-budgeted training loop.
 Selfplay (C++ binary) -> replay buffer -> train -> timed checkpoints -> TorchScript export.
-Arena vs champion when possible; otherwise promotes latest. Tracks Elo vs wall-clock in log.jsonl.
+Arena vs champion when possible; champion promotion is SPRT-gated (accept H1 only on a
+confirmed gain, else keep the incumbent; first run promotes unconditionally).
+Tracks Elo vs wall-clock in log.jsonl.
 Usage: python -m gai.orchestrator --config configs/competition_60m.yaml --game connect4 [--minutes 2]"""
 import argparse, json, math, os, subprocess, time, yaml, torch
 import torch.nn.functional as F
 from .data import read_samples, ReplayBuffer, split_held_out
+from .sprt import sprt, promote_decision
 
 def run_cmd(cmd):
     p = subprocess.run(cmd, capture_output=True, text=True)
@@ -20,6 +23,43 @@ def build_supports_nn(build):
     p = run_cmd([f"{build}/selfplay", "--game", "connect4", "--games", "1", "--sims", "2",
                  "--out", "/tmp/gai_nn_probe.bin", "--evaluator", "nn:/tmp/nonexistent.ts"])
     return p.returncode == 0
+
+def sprt_arena_gate(build, game, cand_spec, champ_spec, ev_cfg):
+    """Run candidate-vs-champion arenas in batches, early-stopping on an SPRT verdict.
+
+    Returns (decision, stats) with decision in {'accept_h1','accept_h0','max_games'}.
+    Each batch uses a fresh --seed so the opening sets are independent across batches
+    (see tools/evaluate.cpp). max_games caps the wall-clock cost of the gate.
+    """
+    batch = int(ev_cfg.get("sprt_batch_games", 20))
+    max_games = int(ev_cfg.get("sprt_max_games", 200))
+    sims = int(ev_cfg.get("sprt_sims", ev_cfg.get("sims", 200)))
+    # Gate cost must be predictable: default to FLAT sims (no 6x headroom) so a batch
+    # cannot balloon to max-sims on unstable positions. Opt back in with sprt_max_sims.
+    max_sims = int(ev_cfg.get("sprt_max_sims", sims))
+    elo0 = float(ev_cfg.get("sprt_elo0", 0.0))
+    elo1 = float(ev_cfg.get("sprt_elo1", 5.0))
+    alpha = float(ev_cfg.get("sprt_alpha", 0.05))
+    beta = float(ev_cfg.get("sprt_beta", 0.05))
+    w = l = d = 0
+    seed = 101
+    dec, llr = "continue", 0.0
+    while w + l + d < max_games:
+        n = min(batch, max_games - (w + l + d))
+        res = sh_json([f"{build}/evaluate", "--game", game, "--games", str(n),
+                       "--sims-a", str(sims), "--sims-b", str(sims),
+                       "--max-sims", str(max_sims),
+                       "--evaluator-a", cand_spec, "--evaluator-b", champ_spec,
+                       "--seed", str(seed)])
+        w += res["wins"]; l += res["losses"]; d += res["draws"]
+        seed += 1
+        dec, llr = sprt(w, l, d, elo0, elo1, alpha, beta)
+        if dec != "continue":
+            break
+    else:
+        dec = "max_games"
+    return dec, dict(w=w, l=l, d=d, games=w + l + d, llr=round(llr, 3),
+                     elo0=elo0, elo1=elo1, alpha=alpha, beta=beta)
 
 def main():
     ap = argparse.ArgumentParser(); ap.add_argument("--config", required=True); ap.add_argument("--game", required=True)
@@ -191,12 +231,13 @@ def main():
             annealed = True
             print(f"anneal: lr {base_lr} -> {base_lr * tr.get('anneal_factor', 0.1)} at el={el_pre:.0f}s")
         # Train for effective_steps
+        rec_w = tr.get("recency_weight", 0.0)
         losses = {}
         for _ in range(effective_steps):
             try:
-                losses = step(*buf.sample(batch_size))
+                losses = step(*buf.sample(batch_size, recency=rec_w))
             except TypeError:
-                xb, pib, zb = buf.sample(batch_size)[:3]
+                xb, pib, zb = buf.sample(batch_size, recency=rec_w)[:3]
                 losses = step(xb, pib, zb)
         el = time.time() - t0
         log.write(json.dumps(dict(iter=it, elapsed_s=round(el, 1), selfplay=stats,
@@ -205,6 +246,7 @@ def main():
                                 heldout_value=heldout_value_mse,
                                 effective_steps=effective_steps,
                                 max_reuse_ratio=max_reuse_ratio,
+                                recency_weight=rec_w,
                                 fresh_positions=fresh_positions,
                                 evaluator=ev, alpha=round(alpha, 3),
                                 **losses)) + "\n")
@@ -235,11 +277,34 @@ def main():
             except Exception as e:
                 print(f"arena failed: {e}")
     save_checkpoint(net, os.path.join(a.out, "latest.pt"))
-    # Promote latest to champion (full gating with SPRT is TODO; cheap arena above is the sanity check)
+    # SPRT-gated champion promotion: only replace the champion when latest.ts is
+    # confirmed stronger by the sequential test; otherwise keep the incumbent.
+    # First run (no champion.ts yet) promotes unconditionally.
     import shutil
+    latest_pt = os.path.join(a.out, "latest.pt")
+    latest_ts_f = os.path.join(a.out, "latest.ts")
+    champ_pt = os.path.join(a.out, "champion.pt")
+    champ_ts_f = os.path.join(a.out, "champion.ts")
+    ev_cfg = cfg.get("eval", {})
+    promote, gate = True, None
+    if ev_cfg.get("sprt", True) and os.path.exists(champ_ts_f) and os.path.exists(latest_ts_f):
+        try:
+            dec, st = sprt_arena_gate(a.build, a.game, f"nn:{latest_ts_f}", f"nn:{champ_ts_f}", ev_cfg)
+            gate = dict(decision=dec, **st)
+            # Promote on a confirmed gain; a max-games non-decision falls back to W>L.
+            promote = promote_decision(dec, st)
+            print(f"SPRT champion gate: {dec} {st} -> promote={promote}")
+        except Exception as e:
+            print(f"SPRT gate failed ({e}); promoting latest")
     try:
-        shutil.copy(os.path.join(a.out, "latest.pt"), os.path.join(a.out, "champion.pt"))
-    except Exception:
-        pass
+        if promote:
+            shutil.copy(latest_pt, champ_pt)
+            if nn_ok and shape is not None:
+                export_torchscript(net, shape, champ_ts_f)
+    except Exception as e:
+        print(f"champion promote failed: {e}")
+    if gate is not None:
+        log.write(json.dumps(dict(iter=it, elapsed_s=round(time.time() - t0, 1),
+                                  sprt_gate=gate, promoted=promote)) + "\n"); log.flush()
 
 if __name__ == "__main__": main()

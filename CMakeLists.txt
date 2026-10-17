@@ -75,7 +75,7 @@ foreach(t validate_game benchmark_game selfplay evaluate play scaling)
 endforeach()
 
 enable_testing()
-foreach(t test_time_manager test_mcts)
+foreach(t test_time_manager test_mcts test_ensemble)
   add_executable(${t} tests/${t}.cpp)
   target_link_libraries(${t} PRIVATE gai_engine)
   add_test(NAME ${t} COMMAND ${t})
