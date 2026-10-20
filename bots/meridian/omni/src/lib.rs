@@ -3,14 +3,14 @@
 //! The site sends a request as JSON and reads a JSON reply. `"type": "move"` asks for a move and
 //! `"type": "analysis"` for the best moves with their values. Both give the position as `start`
 //! and the `moves` played since. This file reads requests and writes replies, and ends with the
-//! three functions the site calls. Omni's strategy is in `search.rs`: an iterative-deepening
-//! alpha-beta search under a wall-clock deadline, so a move can never overrun its time.
+//! three functions the site calls. Omni's strategy is in `search.rs`: Scout's 2-ply search,
+//! bounded by its position budget, so a reply can never overrun its time limit; the deeper
+//! deadline-guarded search there lost the A/B and is kept for tuning only.
 //! https://constellation.blueshrimp.uk/bot-api.md has the details.
 
 pub mod search;
 
 use std::cell::RefCell;
-use std::time::{Duration, Instant};
 
 use meridian_engine::{Game, Move, notation};
 use serde_json::{Value, json};
@@ -20,14 +20,14 @@ use search::Analysis;
 /// How many moves an analysis lists.
 const LISTED_CANDIDATES: usize = 5;
 const DEFAULT_VISITS: u64 = 240;
-/// The site stops a move that runs past its limit and counts it as a failure
-/// (bot-api.md, "Limits"), so Omni aims for 86% of `moveTimeMs`, and never
-/// more than 4.3 s: the last 14% covers the request parse, the reply write and
-/// any clock drift between us and the site.
-const MOVE_TIME_CAP_MS: u64 = 4300;
-const MOVE_TIME_SHARE: u64 = 86;
-/// Analysis keeps its `visits` budget; the wall clock only stops a runaway.
-const ANALYSIS_TIME_CAP: Duration = Duration::from_secs(20);
+/// The smallest `moveTimeMs` the full 4096-position budget is served at: the
+/// full search measures at most ~125 ms in wasm on the heaviest late-game
+/// positions, so any limit from 250 ms up is met with a wide margin. Smaller
+/// limits get a budget scaled to 4 positions per millisecond — best effort
+/// only, because a position's cost varies ~10x with game stage; the site's
+/// documented limit is 5000 ms, where the full budget is served.
+const FULL_BUDGET_FROM_MS: u64 = 250;
+const SCALED_POSITIONS_PER_MS: usize = 4;
 
 /// The reply to one request: a move, an analysis, or an error.
 pub fn answer(request: &Value) -> Value {
@@ -38,33 +38,36 @@ fn reply(request: &Value) -> Result<Value, String> {
     let game = replay(request)?;
     match request["type"].as_str() {
         Some("move") => {
+            // Scout's exact 2-ply shape, bounded by its position budget instead
+            // of a clock, so a reply takes at most ~125 ms in wasm. The deep
+            // search lost the A/B against this at every setting, node and
+            // wall-clock alike (docs/meridian/OMNI_SEARCH_CHANGES.md), so it is
+            // not used for replies. `moveTimeMs` only scales the budget down
+            // for limits below 250 ms; at the site's 5000 ms this is Scout's
+            // full 4096 positions, bit for bit.
             let move_time_ms = request["limits"]["moveTimeMs"].as_u64().unwrap_or(5000);
-            let aim_ms = (move_time_ms * MOVE_TIME_SHARE / 100).clamp(50, MOVE_TIME_CAP_MS);
-            let limits = search::Limits {
-                deadline: Some(Instant::now() + Duration::from_millis(aim_ms)),
-                node_budget: usize::MAX,
+            let budget = if move_time_ms >= FULL_BUDGET_FROM_MS {
+                search::MOVE_BUDGET
+            } else {
+                (move_time_ms as usize).saturating_mul(SCALED_POSITIONS_PER_MS).clamp(16, search::MOVE_BUDGET)
             };
-            let best = search::best_move_limited(game.position(), &search::Params::default(), &limits)
+            let params = search::Params { budget, ..search::Params::default() };
+            let best = search::analyze_2ply(game.position(), &params)
+                .candidates
+                .first()
+                .map(|candidate| candidate.mv)
                 .ok_or("The game is over.")?;
             Ok(json!({"move": best.index()}))
         }
         Some("analysis") => {
+            // Scout's exact shape at the requested `visits`, as the site's own
+            // bot served reviews: the deep search cannot finish an iteration at
+            // review-sized budgets, and lost the A/B at large ones too.
             let visits = request["limits"]["visits"].as_u64().unwrap_or(DEFAULT_VISITS).min(search::MOVE_BUDGET as u64);
-            // Game reviews ask for `visits` 32: at that size Scout's 2-ply shape
-            // gives better candidates than a deep search that never finishes an
-            // iteration, so use it; the deep search needs a real node budget.
-            let analysis = if visits < 256 {
-                search::analyze_2ply(
-                    game.position(),
-                    &search::Params { budget: visits as usize, ..search::Params::default() },
-                )
-            } else {
-                let limits = search::Limits {
-                    deadline: Some(Instant::now() + ANALYSIS_TIME_CAP),
-                    node_budget: visits as usize,
-                };
-                search::analyze_limited(game.position(), &search::Params::default(), &limits)
-            };
+            let analysis = search::analyze_2ply(
+                game.position(),
+                &search::Params { budget: visits as usize, ..search::Params::default() },
+            );
             Ok(json!({"analysis": analysis_json(&analysis)}))
         }
         _ => Err("type must be move or analysis".into()),

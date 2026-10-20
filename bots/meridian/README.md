@@ -2,7 +2,7 @@
 
 A WebAssembly bot for [Meridian](https://constellation.blueshrimp.uk), forked from
 Scout (the site's own bot, `meridian-bot-kit.zip` 2026-10-06). Same engine, same
-search shape, tuned parameters. Upload file: **`omni.wasm`** (266KB, limit 8MB).
+search shape, tuned parameters. Upload file: **`omni.wasm`** (271KB, limit 8MB).
 
 ## What it is
 
@@ -10,8 +10,16 @@ search shape, tuned parameters. Upload file: **`omni.wasm`** (266KB, limit 8MB).
 - `omni/` — our bot crate (fork of `scout/`):
   - `src/search.rs` — Scout's 2-ply search with a `Params` struct
     (`width`, `horizon`, `room_weight`, `budget`). Defaults = Scout values.
-  - `src/lib.rs` — site request/reply + `meridian_abi/alloc/run` exports (unchanged logic).
+    Also holds a deadline-guarded iterative-deepening deep search that lost
+    the engine-vs-engine A/B (10-32-0 vs Scout's 2-ply) and is therefore
+    **not used for replies** — see `docs/meridian/OMNI_SEARCH_CHANGES.md`.
+  - `src/lib.rs` — site request/reply + `meridian_abi/alloc/run` exports.
+    Moves and analysis run Scout's exact 2-ply; the move budget scales down
+    only if `limits.moveTimeMs` is below 250 ms.
   - `src/bin/tune.rs` — engine-vs-engine parameter tuner ("train" step).
+  - `src/bin/bench.rs` — timing/depth benchmark on real site positions
+    (`--budget`, `--deadline-ms`, `--stress`).
+  - `src/bin/parity.rs` — deep-search vs 2-ply move agreement check.
   - `src/bin/smoke.rs` — feeds sample site requests through `answer()`.
 - `omni.wasm` — the built upload artifact.
 - `RULES.md` — the rules.
@@ -65,5 +73,7 @@ Requires Rust 1.85+ and `rustup target add wasm32-wasip1`.
 4. Tick **This bot can analyze positions** — it answers `analysis` (up to 5
    candidates, points, depth 2), so it can also review finished games.
 
-Limits (per site docs): file 8MB (we're 266KB), memory 256MiB, aim for
-`limits.moveTimeMs` (5,000ms in games). Analysis honors its `visits` budget.
+Limits (per site docs): file 8MB (we're 271KB), memory 256MiB, aim for
+`limits.moveTimeMs` (5,000ms in games) — moves reply in ~20–70ms (worst
+observed 125ms), and the budget scales down for any limit below 250ms.
+Analysis honors its `visits` budget.
