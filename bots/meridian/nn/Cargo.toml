@@ -1,0 +1,21 @@
+[package]
+name = "nn"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+publish = false
+
+[lib]
+# cdylib so a standalone wasm module is possible; rlib so the bot crate can use it.
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+meridian-engine = { path = "../engine" }
+serde_json = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+
+# Keeps out of any enclosing Cargo workspace.
+[workspace]

@@ -1,14 +1,16 @@
-//! Scout, the site's own bot, as a WebAssembly module.
+//! Omni, a WebAssembly bot for Meridian.
 //!
 //! The site sends a request as JSON and reads a JSON reply. `"type": "move"` asks for a move and
 //! `"type": "analysis"` for the best moves with their values. Both give the position as `start`
 //! and the `moves` played since. This file reads requests and writes replies, and ends with the
-//! three functions the site calls. Scout's strategy is in `search.rs`: to make your own bot,
-//! replace it and keep this file. https://constellation.blueshrimp.uk/bot-api.md has the details.
+//! three functions the site calls. Omni's strategy is in `search.rs`: an iterative-deepening
+//! alpha-beta search under a wall-clock deadline, so a move can never overrun its time.
+//! https://constellation.blueshrimp.uk/bot-api.md has the details.
 
 pub mod search;
 
 use std::cell::RefCell;
+use std::time::{Duration, Instant};
 
 use meridian_engine::{Game, Move, notation};
 use serde_json::{Value, json};
@@ -18,6 +20,14 @@ use search::Analysis;
 /// How many moves an analysis lists.
 const LISTED_CANDIDATES: usize = 5;
 const DEFAULT_VISITS: u64 = 240;
+/// The site stops a move that runs past its limit and counts it as a failure
+/// (bot-api.md, "Limits"), so Omni aims for 86% of `moveTimeMs`, and never
+/// more than 4.3 s: the last 14% covers the request parse, the reply write and
+/// any clock drift between us and the site.
+const MOVE_TIME_CAP_MS: u64 = 4300;
+const MOVE_TIME_SHARE: u64 = 86;
+/// Analysis keeps its `visits` budget; the wall clock only stops a runaway.
+const ANALYSIS_TIME_CAP: Duration = Duration::from_secs(20);
 
 /// The reply to one request: a move, an analysis, or an error.
 pub fn answer(request: &Value) -> Value {
@@ -28,12 +38,34 @@ fn reply(request: &Value) -> Result<Value, String> {
     let game = replay(request)?;
     match request["type"].as_str() {
         Some("move") => {
-            let best = search::best_move(game.position()).ok_or("The game is over.")?;
+            let move_time_ms = request["limits"]["moveTimeMs"].as_u64().unwrap_or(5000);
+            let aim_ms = (move_time_ms * MOVE_TIME_SHARE / 100).clamp(50, MOVE_TIME_CAP_MS);
+            let limits = search::Limits {
+                deadline: Some(Instant::now() + Duration::from_millis(aim_ms)),
+                node_budget: usize::MAX,
+            };
+            let best = search::best_move_limited(game.position(), &search::Params::default(), &limits)
+                .ok_or("The game is over.")?;
             Ok(json!({"move": best.index()}))
         }
         Some("analysis") => {
             let visits = request["limits"]["visits"].as_u64().unwrap_or(DEFAULT_VISITS).min(search::MOVE_BUDGET as u64);
-            Ok(json!({"analysis": analysis_json(&search::analyze(game.position(), visits as usize))}))
+            // Game reviews ask for `visits` 32: at that size Scout's 2-ply shape
+            // gives better candidates than a deep search that never finishes an
+            // iteration, so use it; the deep search needs a real node budget.
+            let analysis = if visits < 256 {
+                search::analyze_2ply(
+                    game.position(),
+                    &search::Params { budget: visits as usize, ..search::Params::default() },
+                )
+            } else {
+                let limits = search::Limits {
+                    deadline: Some(Instant::now() + ANALYSIS_TIME_CAP),
+                    node_budget: visits as usize,
+                };
+                search::analyze_limited(game.position(), &search::Params::default(), &limits)
+            };
+            Ok(json!({"analysis": analysis_json(&analysis)}))
         }
         _ => Err("type must be move or analysis".into()),
     }

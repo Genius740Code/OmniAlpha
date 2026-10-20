@@ -1,11 +1,14 @@
 //! Tune Omni's search parameters by playing engine-vs-engine matches.
 //!
 //! Usage: tune [--budget N] [--games N] [--openings K] [--seed S] [--only NAME]
-//!   Plays baseline (Scout defaults) vs each candidate, alternating colors,
-//!   and prints W/L/D from the candidate's point of view.
-//!   Each game starts from K random opening moves (seeded RNG) so that
-//!   large --games values give independent games instead of replays.
+//!   Plays the legacy 2-ply engine (Scout's shape, `analyze_2ply`) against each
+//!   candidate, alternating colors, and prints W/L/D from the candidate's view.
+//!   Each game starts from K random opening moves (seeded RNG) so that large
+//!   --games values give independent games instead of replays.
 //!   --only restricts to candidates whose name contains the filter.
+//!
+//! `--budget N` sets both sides' budget: positions for the legacy engine,
+//! nodes for the deep search, so both sides spend about the same time.
 //!
 //! This is the "train" step: parameter search on the real rules engine.
 //! Keep it small: full-budget games are slow; tune at reduced budget, then
@@ -14,7 +17,7 @@
 use std::time::Instant;
 
 use meridian_engine::{Game, Move, Outcome, Player};
-use omni::{search, search::Params};
+use omni::search::{self, Params};
 
 /// Minimal deterministic RNG (xorshift64*) — no extra crates.
 struct Rng(u64);
@@ -35,7 +38,33 @@ impl Rng {
     }
 }
 
-fn play_one(blue: &Params, red: &Params, openings: usize, seed: u64) -> Outcome {
+/// Which engine a side plays.
+enum Engine {
+    /// Scout's exact 2-ply search over `width` candidates.
+    Legacy(Params),
+    /// The deep iterative-deepening search under a node budget.
+    Deep(Params),
+    /// The deep search under a wall-clock deadline, as the site plays it.
+    Timed(Params, std::time::Duration),
+}
+
+impl Engine {
+    fn best(&self, position: &meridian_engine::Position) -> Option<Move> {
+        match self {
+            Engine::Legacy(params) => search::analyze_2ply(position, params).candidates.first().map(|c| c.mv),
+            Engine::Deep(params) => search::best_move_with(position, params),
+            Engine::Timed(params, per_move) => {
+                let limits = search::Limits {
+                    deadline: Some(std::time::Instant::now() + *per_move),
+                    node_budget: usize::MAX,
+                };
+                search::best_move_limited(position, params, &limits)
+            }
+        }
+    }
+}
+
+fn play_one(blue: &Engine, red: &Engine, openings: usize, seed: u64) -> Outcome {
     let mut game = Game::new();
     if openings > 0 {
         let mut rng = Rng(seed);
@@ -54,8 +83,8 @@ fn play_one(blue: &Params, red: &Params, openings: usize, seed: u64) -> Outcome 
         }
     }
     while !game.is_over() {
-        let params = if game.position().to_move() == Player::Blue { blue } else { red };
-        match search::best_move_with(game.position(), params) {
+        let engine = if game.position().to_move() == Player::Blue { blue } else { red };
+        match engine.best(game.position()) {
             Some(mv) => {
                 game.play(mv).expect("search returns legal moves");
             }
@@ -78,6 +107,7 @@ fn main() {
     let mut games = 4usize;
     let mut openings = 6usize;
     let mut seed = 1u64;
+    let mut deep_ms = 0u64; // 0 = node-budget candidates; >0 = wall-clock candidates at this many ms
     let mut only = String::new();
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -86,31 +116,45 @@ fn main() {
             "--games" => games = args.next().and_then(|v| v.parse().ok()).unwrap_or(games),
             "--openings" => openings = args.next().and_then(|v| v.parse().ok()).unwrap_or(openings),
             "--seed" => seed = args.next().and_then(|v| v.parse().ok()).unwrap_or(seed),
+            "--deep-ms" => deep_ms = args.next().and_then(|v| v.parse().ok()).unwrap_or(deep_ms),
             "--only" => only = args.next().unwrap_or_default(),
             _ => eprintln!("unknown arg {a}"),
         }
     }
 
-    let baseline = Params { budget, ..Params::default() };
-    let candidates: Vec<(&str, Params)> = vec![
-        ("width12", Params { width: 12, budget, ..Params::default() }),
-        ("width6", Params { width: 6, budget, ..Params::default() }),
-        ("width4", Params { width: 4, budget, ..Params::default() }),
-        ("width16", Params { width: 16, budget, ..Params::default() }),
-        ("horizon8", Params { horizon: 8, budget, ..Params::default() }),
-        ("horizon10", Params { horizon: 10, budget, ..Params::default() }),
-        ("horizon14", Params { horizon: 14, budget, ..Params::default() }),
-        ("horizon16", Params { horizon: 16, budget, ..Params::default() }),
-        ("room0.0", Params { room_weight: 0.0, budget, ..Params::default() }),
-        ("room0.2", Params { room_weight: 0.2, budget, ..Params::default() }),
-        ("room0.3", Params { room_weight: 0.3, budget, ..Params::default() }),
-        ("room0.5", Params { room_weight: 0.5, budget, ..Params::default() }),
-        ("room0.6", Params { room_weight: 0.6, budget, ..Params::default() }),
-        ("room0.8", Params { room_weight: 0.8, budget, ..Params::default() }),
-    ];
+    let baseline = Engine::Legacy(Params { budget, ..Params::default() });
+    let timed = |width: usize, branch: usize, depth_max: u8| {
+        Engine::Timed(
+            Params { width, branch, depth_max, budget, ..Params::default() },
+            std::time::Duration::from_millis(deep_ms),
+        )
+    };
+    let deep = |width: usize, branch: usize, depth_max: u8| {
+        Engine::Deep(Params { width, branch, depth_max, budget, ..Params::default() })
+    };
+    let candidates: Vec<(&str, Engine)> = if deep_ms > 0 {
+        vec![
+            ("timed-w8", timed(8, 24, 8)),
+            ("timed-w16", timed(16, 24, 8)),
+            ("timed-b48", timed(8, 48, 8)),
+            ("timed-b12", timed(8, 12, 8)),
+        ]
+    } else {
+        vec![
+            ("deep-w8", deep(8, 24, 8)),
+            ("deep-w16", deep(16, 24, 8)),
+            ("deep-w4", deep(4, 24, 8)),
+            ("deep-b48", deep(8, 48, 8)),
+            ("deep-b12", deep(8, 12, 8)),
+            ("deep-b0", deep(8, 0, 8)),
+            ("deep-w16-b48", deep(16, 48, 8)),
+            ("deep-d4", deep(8, 24, 4)),
+            ("deep-d6", deep(8, 24, 6)),
+        ]
+    };
 
     println!(
-        "tune: budget={budget} games-per-pairing={games} openings={openings} seed={seed} (alternating colors)"
+        "tune: baseline=legacy2ply(w8,budget={budget}) deep_ms={deep_ms} games-per-pairing={games} openings={openings} seed={seed} (alternating colors)"
     );
     for (name, cand) in &candidates {
         if !only.is_empty() && !name.contains(&only as &str) {
