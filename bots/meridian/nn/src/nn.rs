@@ -23,23 +23,45 @@ use std::sync::OnceLock;
 
 use meridian_engine::{Move, Player, Position};
 
+use crate::nnfast::forward_fast;
 use crate::weights;
 
+// ---------------------------------------------------------------------------
+// Per-game adapter: change these.
+//
+// The conv/SGEMM kernels in `convfast.rs` are game-agnostic — board size is
+// a const-generic parameter there and every other dimension is a runtime
+// argument — so porting the inference crate to another jam's net is: copy
+// this block, rewrite `input_planes` + `top_moves` for the new game's
+// encoding, and retrain `weights.rs`. See docs/meridian/NN_PLAN.md.
+// ---------------------------------------------------------------------------
+
+/// Board side; each plane is `BOARD * BOARD` points.
 pub const BOARD: usize = 19;
+/// Points per plane.
 pub const POINTS: usize = BOARD * BOARD;
+/// Input planes the data builder produces (the encoding below).
 pub const IN_PLANES: usize = 14;
-/// The value head output is `tanh(final score margin / this)`, Blue's lead positive.
-pub const MARGIN_SCALE: f64 = 1500.0;
+/// The value head output is `tanh(final score margin / this)`, Blue's lead
+/// positive. 600 since the 2026-10-21 retrain: the margin-scale sweep
+/// (600/900/1500, see docs/meridian/TRAINING_FAST.md) picked 600 — close-game
+/// targets use more of the tanh's range and the value head is sharper there.
+pub const MARGIN_SCALE: f64 = 600.0;
 const SCORE_SCALE: f64 = 100.0;
 
 /// Trunk channels of the CNN.
-const CH: usize = 32;
+pub(crate) const CH: usize = 32;
 /// Residual blocks in the CNN.
-const BLOCKS: usize = 4;
+pub(crate) const BLOCKS: usize = 4;
 /// Policy-head channels: one per move direction, so flatten == move ID.
-const PCH: usize = 48;
+pub(crate) const PCH: usize = 48;
 /// Value-head channels.
-const VCH: usize = 16;
+pub(crate) const VCH: usize = 16;
+
+/// Row stride of the internal planes: `POINTS` rounded up to a multiple of
+/// 4 f32s (16 bytes) so the wasm SIMD kernel's loads and stores are always
+/// 16-byte aligned. Padding columns are never written and stay zero.
+pub(crate) const PSTRIDE: usize = POINTS.div_ceil(4) * 4;
 
 /// One evaluation of a position.
 pub struct Eval {
@@ -53,8 +75,18 @@ pub struct Eval {
 ///
 /// Positive favours Blue. `atanh(value) * 1500` is roughly the final point
 /// margin the net expects; the bounded `value` itself is what comparisons and
-/// search can use directly. Skips the policy head.
+/// search can use directly. Skips the policy head. Runs the im2col + SGEMM
+/// kernels ([`crate::nnfast`]); use [`eval_value_reference`] for the
+/// pre-optimization path.
 pub fn eval_value(position: &Position) -> f64 {
+    let mut input = [0f32; IN_PLANES * POINTS];
+    input_planes(position, &mut input);
+    forward_fast(&input, false).0
+}
+
+/// The value via the reference (direct-conv) forward pass — kept for
+/// `nnbench --verify`, which gates the fast kernels on matching it bit-near.
+pub fn eval_value_reference(position: &Position) -> f64 {
     let mut input = [0f32; IN_PLANES * POINTS];
     input_planes(position, &mut input);
     forward(&input, false).0
@@ -70,6 +102,14 @@ pub fn eval(position: &Position) -> Eval {
 
 /// The value and the raw policy logits (17,328 move IDs, before legality masking).
 pub fn eval_logits(position: &Position) -> (f64, Option<[f32; meridian_engine::NUM_MOVES]>) {
+    let mut input = [0f32; IN_PLANES * POINTS];
+    input_planes(position, &mut input);
+    forward_fast(&input, true)
+}
+
+/// The logits via the reference (direct-conv) forward pass — same contract,
+/// used only by `nnbench --verify`.
+pub fn eval_logits_reference(position: &Position) -> (f64, Option<[f32; meridian_engine::NUM_MOVES]>) {
     let mut input = [0f32; IN_PLANES * POINTS];
     input_planes(position, &mut input);
     forward(&input, true)
@@ -175,31 +215,45 @@ fn set_edge(set: &mut impl FnMut(usize, i8, i8), plane: usize, edge: meridian_en
 
 // The network, decoded once from `weights` and kept for the process's lifetime.
 
-struct Block {
-    c1_w: Vec<f32>,
-    c1_b: Vec<f32>,
-    c2_w: Vec<f32>,
-    c2_b: Vec<f32>,
+pub(crate) struct Block {
+    pub(crate) c1_w: Vec<f32>,
+    pub(crate) c1_b: Vec<f32>,
+    pub(crate) c2_w: Vec<f32>,
+    pub(crate) c2_b: Vec<f32>,
 }
 
-struct Net {
-    stem_w: Vec<f32>,
-    stem_b: Vec<f32>,
-    blocks: Vec<Block>,
-    v_w: Vec<f32>,
-    v_b: Vec<f32>,
-    v_fc_w: Vec<f32>,
-    v_fc_b: Vec<f32>,
-    p1_w: Vec<f32>,
-    p1_b: Vec<f32>,
-    p2_w: Vec<f32>,
-    p2_b: Vec<f32>,
+pub(crate) struct Net {
+    pub(crate) stem_w: Vec<f32>,
+    pub(crate) stem_b: Vec<f32>,
+    pub(crate) blocks: Vec<Block>,
+    pub(crate) v_w: Vec<f32>,
+    pub(crate) v_b: Vec<f32>,
+    pub(crate) v_fc_w: Vec<f32>,
+    pub(crate) v_fc_b: Vec<f32>,
+    pub(crate) p1_w: Vec<f32>,
+    pub(crate) p1_b: Vec<f32>,
+    pub(crate) p2_w: Vec<f32>,
+    pub(crate) p2_b: Vec<f32>,
 }
 
 impl Net {
     fn decode() -> Net {
         let mut at = 0usize;
-        let mut floats: Vec<f32> = weights::BYTES
+        // The compiled-in weights are the shipped net. NN_WEIGHTS_FILE (a
+        // native-only testing hook for the training pipeline: point it at the
+        // raw little-endian f32 bytes a `pipeline.py --export` run produces)
+        // swaps them without recompiling, so a fresh checkpoint can be timed
+        // and scored with nnbench before it is committed to weights.rs.
+        let owned;
+        let bytes: &[u8] = match std::env::var("NN_WEIGHTS_FILE") {
+            Ok(path) if !path.is_empty() && cfg!(not(target_arch = "wasm32")) => {
+                owned = std::fs::read(&path)
+                    .unwrap_or_else(|e| panic!("NN_WEIGHTS_FILE {path}: {e}"));
+                &owned
+            }
+            _ => weights::BYTES,
+        };
+        let mut floats: Vec<f32> = bytes
             .chunks_exact(4)
             .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
             .collect();
@@ -241,7 +295,7 @@ impl Net {
 
 static NET: OnceLock<Net> = OnceLock::new();
 
-fn net() -> &'static Net {
+pub(crate) fn net() -> &'static Net {
     NET.get_or_init(Net::decode)
 }
 
@@ -253,7 +307,10 @@ thread_local! {
         const { std::cell::RefCell::new((Vec::new(), Vec::new())) };
 }
 
-/// One forward pass. Returns the value and, when `policy` is set, the move logits.
+/// One forward pass, the reference implementation: direct convolution, the
+/// code that shipped before the im2col + SGEMM kernels. Production inference
+/// goes through [`crate::nnfast::forward_fast`]; this stays as the bit-near
+/// oracle for `nnbench --verify` and as a readable statement of the math.
 fn forward(input: &[f32; IN_PLANES * POINTS], policy: bool) -> (f64, Option<[f32; meridian_engine::NUM_MOVES]>) {
     let net = net();
     let mut logits_out = None;

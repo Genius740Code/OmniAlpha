@@ -1,0 +1,19 @@
+[package]
+name = "nn-train-dumper"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Extraction tool for the supervised trainer. Depends on the inference crate so
+# the dumped input planes are byte-identical to `nn::input_planes` by construction.
+
+[dependencies]
+meridian-engine = { path = "../../../engine" }
+nn = { path = "../.." }
+serde_json = "1"
+
+[profile.release]
+lto = true
+codegen-units = 1
+
+[workspace]

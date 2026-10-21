@@ -5,9 +5,10 @@ exported weights + `nnbench` harness). `omni/` is **untouched** — this documen
 proposal for wiring the net in. Nothing here changes the shipped bot.
 
 One-line summary: **the net beats the handcrafted heuristic decisively at predicting
-game outcomes (sign accuracy 78% vs 56% on the bench games), but one value pass costs
-11 ms native / 31 ms wasm vs ~2 µs for the heuristic — so as written it cannot be a
-leaf evaluator; the realistic win today is the policy head for root move ordering.**
+game outcomes (sign accuracy 78% vs 56% on the bench games), and after the Oct 20
+im2col+SGEMM rewrite one value pass costs 4.6 ms native / 5.0 ms wasm-simd (was
+11 / 28) — value-in-search at the hundreds-of-evals scale is now affordable, and
+the policy head for root move ordering is nearly free.**
 
 ## What exists
 
@@ -113,7 +114,7 @@ Policy quality on the same 1,428 positions (mean 436 legal moves):
 | legal top-1 == move actually played | 11.3% (recorded val: 11.2%) |
 | played move in top-8 | **32.4%** (random top-8 ≈ 1.8% ⇒ ~17× lift) |
 
-## Timing (measured today)
+## Timing (measured today — the "before" numbers; superseded by *Inference speed* below)
 
 Native `x86_64` release (this 2-core box, single-threaded), 276 real mid-game
 positions, medians stable across repeated runs (single-run jitter ~±5%):
@@ -142,6 +143,39 @@ omni's deep search currently reaches 521k nodes (p50) in its 4.3 s deadline; eve
 ~138 wasm value evals would consume the entire move budget. The deadline guard would
 keep any of this *safe*, but naive NN-in-search would be *slow*, not strong.
 
+### Porting to a new game (the reuse checklist)
+
+The crate is a small generic value/policy CNN engine; Meridian is one
+configuration of it. The split is deliberate and load-bearing — when the next
+jam needs a net, walk this list and touch nothing else:
+
+* **`nn.rs` "Per-game adapter: change these" block** — board side, input plane
+  count, trunk channels, residual blocks, policy/value head channels, value
+  margin scale. That one const block is the whole per-game configuration
+  surface of the inference engine.
+* **`nn::input_planes`** — the one genuinely game-specific function: encode one
+  game state into `IN_PLANES × BOARD²` f32s (the new game's data builder must
+  produce byte-identical planes; see `train/dumper/` for how Meridian does it
+  with the engine itself).
+* **`weights.rs`** — regenerate from the new game's training run; the tensor
+  order (stem → N blocks → value head → policy head) and `LAYOUT` stay the
+  same shape of contract, sizes follow the const block. `NN_WEIGHTS_FILE`
+  lets `nnbench` time/score a fresh checkpoint before it is committed.
+* **the move API surface** — `eval`/`top_moves` speak the game's `Move` type
+  (Meridian: move ID = `direction * 361 + source`); adapt to the new game's
+  move indexing.
+* **Nothing in the kernels**: `convfast.rs` (im2col + SGEMM + wasm simd128)
+  contains no game logic — `im2col` is const-generic over board size, channel
+  counts are runtime arguments — and `nnfast.rs` is just the Meridian
+  configuration of that dataflow (stem → blocks → heads). `nnbench --verify`
+  then gates the port: fast path must match the reference conv bit-near on
+  real positions.
+
+Rough effort split for a same-shaped game (board ≤ 19×19, ~14 input planes,
+~100k params): the const block and the weights file are mechanical,
+`input_planes` + the move-ID mapping are the real work, and the kernels are
+untouched by construction.
+
 ## Integration path into omni search
 
 omni today: iterative-deepening negamax alpha-beta (width 8 root candidates from
@@ -162,12 +196,11 @@ Ordered by (value ÷ cost), each step gated by a `tune` A/B before shipping:
 3. **Value for resign/abort decisions**: `eval_value` once per move is affordable and
    the net's 78% sign accuracy is far better than the heuristic's 56% — but only after
    recalibration (see verdict).
-4. **Not leaf evals.** As written the net cannot replace `evaluate_with` at leaves —
-   5,000–14,000× too slow. To make value-in-search real, first optimize `nn::conv`
-   (scalar loops today; im2col + f32 dot / SIMD should yield 3–10×; the math is
-   testable byte-for-byte against the current implementation via `nnbench --val`).
-   At 5× the wasm forward is ~6 ms ⇒ ~700 value evals/move inside the deadline —
-   enough for a shallow value-guided pass or a frontier re-ranking.
+4. **Not leaf evals.** As originally written the net could not replace
+   `evaluate_with` at leaves — 5,000–14,000× too slow. **Done Oct 20:** the
+   im2col + SGEMM kernels landed (see *Inference speed*); wasm value-only is
+   now ~5 ms, so ~870 value evals fit the 4.3 s budget — frontier/root value
+   re-ranking is in reach, full 4,096-leaf coverage still is not.
 5. Sign convention to respect when wiring: nn value is **Blue-perspective**
    (positive favors Blue); omni's negamax reasons mover-relative — negate for Red.
    Wasm size grows ~400 KB (310 → ~710 KB, limit 8 MB).
@@ -196,8 +229,9 @@ search quality today.
 1. Wire policy-ordered root candidates into omni behind a flag; `tune` A/B (24+ games,
    4300 ms/move) vs the current champion. Ship only on a win.
 2. If (1) is positive: add the root value veto (step 2), same gate.
-3. Optimize `nn::conv` (SIMD/im2col), re-verify with `nnbench --val` (numbers must not
-   move), re-cost the value-in-search math.
+3. ~~Optimize `nn::conv` (SIMD/im2col), re-verify with `nnbench --val`~~ **Done
+   Oct 20** — `convfast.rs`/`nnfast.rs` (see *Inference speed*); gate with
+   `nnbench --verify`. The value-in-search math above is re-costed there.
 4. Recalibrate the value head on close games (output temperature / margin clipping),
    then consider resign gating.
 5. Re-create the torch-parity `--check` artifacts next time a training scratch
@@ -205,16 +239,80 @@ search quality today.
 6. Longer term: self-play data from omni's own games to lift the site-bot ceiling;
    distill to a smaller student net if the policy head proves its Elo.
 
+## Inference speed (Oct 20, im2col + SGEMM rewrite)
+
+`src/convfast.rs` (new, game-agnostic kernels) + `src/nnfast.rs` (new, the
+production forward pass) replace the direct conv as the shipped path. The
+reference direct conv stays in `nn.rs` as the bit-near oracle; `nnbench
+--verify` gates the fast kernels against it and times both paths in one
+binary, on the same 276 bench positions (min of 3 runs; the box shares time
+with a live training run, so medians bounce ±20% — ratios are the durable part).
+
+| pass | native before | native after | wasm before | wasm after (scalar) | wasm after (simd128) |
+|---|---|---|---|---|---|
+| value-only | 10.7 ms | **6.0 ms** (1.8×) | 28.2 ms | 14.8 ms (1.9×) | **4.96 ms (5.7×)** |
+| full (policy + top-8) | 13.0 ms | **7.2 ms** (1.8×) | 33.0 ms | 18.5 ms (1.8×) | **5.94 ms (5.6×)** |
+
+Native "after" is the portable build (SSE2 baseline); `RUSTFLAGS="-C
+target-cpu=native"` (AVX2+FMA) gives 4.6 / 5.7 ms (2.3×). Wasm numbers are
+Node 20 V8, `wasm32-wasip1` built with `RUSTFLAGS="-C target-feature=+simd128"`
+(the site's V8 supports it; a plain build silently uses the scalar kernel and
+still passes the gate).
+
+Techniques: im2col reorders each 3×3/5×5 conv into one SGEMM
+`C[M][N] = relu?(bias + A·B)` in the weights' own tap order, so every output
+element accumulates in the reference conv's order; the GEMM is M×4 / N×8
+register-tiled with fixed-size inner arrays (fully unrolled, no bounds
+checks, accumulators live in registers); internal planes are 16-byte-aligned
+fixed-size buffers with rows padded to a 364-f32 stride so the wasm v128
+kernel's loads/stores are provably aligned (the only `unsafe` in the crate,
+cfg-gated to `simd128` builds); the value head's 1×1 conv + ReLU + global
+average pool are fused into one pass. Steady state allocates nothing — the
+workspace is a thread-local fixed-size struct.
+
+Accuracy: unchanged by construction and by measurement — `nnbench --verify`
+against the reference conv: max |Δvalue| **2.5e-6** native and wasm (gate
+1e-5), max |Δlogit| 2.1e-5, top-8 ranking identical on 276/276 positions, and
+`--val` metrics are bit-identical to the committed net (mse 0.0455, sign
+0.7836, corr 0.5498, policy 62.3/11.3/32.4% on all 1,428 bench positions).
+Wasm size: nnbench.wasm 709 KB → **751–753 KB** (net + kernels + kept
+reference; omni.wasm embedding stays ~0.75 MB, far under the 8 MB limit).
+The 26-tensor `LAYOUT`/decode contract is untouched.
+
+Value-in-search math, at 4.96 ms per wasm value eval and the 4.3 s deadline:
+**~870 value evals/move if the whole budget went to the net** (was ~150),
+or ~260 evals at a realistic 30% share — so frontier/root-candidate value
+re-ranking and a shallow value-guided pass are now affordable in-wasm.
+Full 4,096-leaf coverage would still cost ~20 s/move; that stays out of
+reach without further (likely 4–8-bit quantization) work.
+
+Porting to a new game (the kernels are already game-agnostic):
+
+* Copy the `per-game adapter` block at the top of `nn.rs` (board size, plane
+  count, channels/blocks, derived `PSTRIDE`) and adjust the
+  `im2col::<BOARD>` / `sgemm` shapes in `nnfast.rs`; `convfast.rs` takes
+  every dimension as a parameter (board size const-generic, channels
+  runtime) and needs no changes — its unit tests already run on a 7×7 board.
+* Rewrite `input_planes` + `top_moves` (move-ID mapping) for the new game's
+  encoding — the only game logic in the crate — and retrain; regenerate
+  `weights.rs` in the same 26-tensor `LAYOUT` order `Net::decode` reads.
+* Gate before shipping: `nnbench --verify` (bit-near vs the reference conv,
+  < 1e-5), then `nnbench --val` (metrics must not move), native **and**
+  `wasm32-wasip1` (+`simd128` if used) both building clean.
+
 ## Reproduce (all run today, 2026-10-20)
 
 ```sh
 cd bots/meridian/nn
 cargo build --release                                   # native
-cargo build --release --target wasm32-wasip1            # wasm
-./target/release/nnbench                                # timing (native table above)
+cargo build --release --target wasm32-wasip1            # wasm (scalar kernel)
+RUSTFLAGS="-C target-feature=+simd128" \
+  CARGO_TARGET_DIR=/tmp/nn-simd cargo build --release --target wasm32-wasip1
+./target/release/nnbench                                # timing (production path)
+./target/release/nnbench --verify                        # accuracy gate + both-path timing
 ./target/release/nnbench --val fixtures/bench_games.json 1   # accuracy tables above
-node --experimental-wasi-unstable-preview1 /tmp/opencode/wasirun.js \
-  target/wasm32-wasip1/release/nnbench.wasm            # wasm timing table above
+node --experimental-wasi-unstable-preview1 /tmp/opencode/nn-wasirun.js \
+  target/wasm32-wasip1/release/nnbench.wasm --verify    # wasm gate + timing
 # nnbench --check (torch parity) needs the wiped /tmp/opencode/nn-data artifacts.
 ```
 

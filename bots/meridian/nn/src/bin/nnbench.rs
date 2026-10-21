@@ -1,10 +1,15 @@
 //! Benchmark and verification harness for the Meridian value/policy net.
 //!
-//! Modes (native; the default mode also works under `wasm32-wasip1`, where it
-//! has no files and uses only the embedded bench games):
+//! Modes (native; the default and --verify modes also work under
+//! `wasm32-wasip1`, where they have no files and use only the embedded bench
+//! games):
 //!
 //!   (default)        Time the forward pass on real mid-game positions from
 //!                     the embedded bench games (close, recent site games).
+//!   --verify         Accuracy gate + before/after timing: the fast
+//!                     (im2col + SGEMM) path must match the reference
+//!                     (direct-conv) path bit-near (value < 1e-5) on every
+//!                     bench position, then both paths are timed.
 //!   --check          End-to-end verification: replay validation games, rebuild
 //!                     the input planes with the engine (must byte-match the
 //!                     dumper's stored inputs) and compare the Rust value head
@@ -36,6 +41,7 @@ fn main() {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
+            "--verify" => return verify(),
             "--check" => return check(&dense_path, &expected_path),
             "--val" => {
                 if i + 1 < args.len() && !args[i + 1].starts_with("--") {
@@ -164,6 +170,82 @@ fn timing() {
         value_us[value_us.len() / 2] * 4096.0 / 1e6,
         value_us[value_us.len() / 2] * 100.0 / 1e3
     );
+}
+
+/// Timing helper shared by the verify passes: median and p90 over one pass
+/// per bench position, microseconds.
+fn time_pass<F: FnMut(&Position)>(name: &str, positions: &[Position], mut f: F) -> f64 {
+    let mut us = Vec::with_capacity(positions.len());
+    for position in positions {
+        let t = Instant::now();
+        f(position);
+        us.push(t.elapsed().as_secs_f64() * 1e6);
+    }
+    us.sort_by(|a, b| a.total_cmp(b));
+    let at = |p: f64| us[((us.len() as f64 - 1.0) * p) as usize];
+    println!("{name:>12}: median {:7.0} us   p90 {:7.0} us", at(0.5), at(0.9));
+    at(0.5)
+}
+
+/// Accuracy gate + before/after timing on the bench positions: the fast
+/// (im2col + SGEMM) forward pass is checked against the reference
+/// (direct-conv) implementation — which is byte-identical to the previously
+/// shipped `nn::conv` — and then both paths are timed in the same binary, on
+/// the same positions, single-run each, so the speedup is apples-to-apples.
+fn verify() {
+    let positions = bench_positions();
+    println!("verify: {} real mid-game positions (bench games)", positions.len());
+    let (mut max_value, mut max_logit, mut top8_flip) = (0f64, 0f32, 0usize);
+
+    for position in &positions {
+        let (vf, lf) = nn::eval_logits(position);
+        let (vr, lr) = nn::eval_logits_reference(position);
+        let (lf, lr) = (lf.expect("policy requested"), lr.expect("policy requested"));
+        max_value = max_value.max((vf - vr).abs());
+        for (a, b) in lf.iter().zip(lr.iter()) {
+            max_logit = max_logit.max((a - b).abs());
+        }
+        let ranked_fast = top_moves(position, &lf, 8);
+        let ranked_ref = top_moves(position, &lr, 8);
+        if ranked_fast.iter().zip(&ranked_ref).any(|(a, b)| a.0 != b.0) {
+            top8_flip += 1;
+        }
+    }
+    println!("  max |value_fast - value_ref| = {max_value:.3e}   (gate < 1e-5)");
+    println!("  max |logit_fast - logit_ref| = {max_logit:.3e}   (gate < 1e-3)");
+    println!("  top-8 ranking differs on {top8_flip}/{} positions", positions.len());
+    let pass = max_value < 1e-5 && max_logit < 1e-3;
+
+    // Warmup (also triggers the one-time weight decode on both paths).
+    for position in positions.iter().take(3) {
+        std::hint::black_box(eval_value(position));
+        std::hint::black_box(nn::eval_value_reference(position));
+    }
+    let med_v_fast = time_pass("value fast", &positions, |p| {
+        std::hint::black_box(eval_value(p));
+    });
+    let med_v_ref = time_pass("value ref", &positions, |p| {
+        std::hint::black_box(nn::eval_value_reference(p));
+    });
+    let med_f_fast = time_pass("full fast", &positions, |p| {
+        std::hint::black_box(nn::eval(p));
+    });
+    let med_f_ref = time_pass("full ref", &positions, |p| {
+        let (_v, l) = nn::eval_logits_reference(p);
+        let l = l.expect("policy requested");
+        std::hint::black_box(top_moves(p, &l, 8));
+    });
+    println!(
+        "speedup vs reference: value-only {:.2}x, full {:.2}x",
+        med_v_ref / med_v_fast,
+        med_f_ref / med_f_fast
+    );
+    if pass {
+        println!("PASS");
+    } else {
+        println!("FAIL (gate: value < 1e-5, logits < 1e-3)");
+        std::process::exit(1);
+    }
 }
 
 /// End-to-end verification against the training pipeline's own outputs:
