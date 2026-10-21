@@ -3,6 +3,7 @@
 // so a parent can read children's Q directly as "good for me".
 #pragma once
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <random>
 #include <vector>
@@ -14,7 +15,7 @@ namespace gai {
 struct MctsConfig {
   float c_puct = 1.5f;
   float fpu_reduction = 0.25f;     // unvisited child Q = parent Q - fpu_reduction
-  float dirichlet_alpha = 0.0f;    // 0 disables root noise
+  float dirichlet_alpha = 0.0f;    // 0 disables root noise (unless dirichlet_auto)
   float dirichlet_eps = 0.25f;
   size_t max_nodes = 4'000'000;    // compact() on advance_root when exceeded
   bool forced_playouts = false;    // KataGo-style: guarantee min visits per root child
@@ -33,6 +34,10 @@ struct MctsConfig {
                                     // effective prior = prior^(1/temp), temp>1 flattens
   bool loss_fallthrough = true;     // all-proven-loss node falls through to PUCT
                                     // (max-resistance) instead of leftmost child
+  bool dirichlet_auto = false;     // root noise alpha derived per root as 10/#root_children
+                                   // (fixed 0.3 is far too spiky for small branching factors
+                                   // like Connect4's 7); skipped below 2 children;
+                                   // dirichlet_alpha ignored. CLI: --dirichlet <= 0.
 };
 
 template <GameLike G> class MCTS {
@@ -95,11 +100,26 @@ template <GameLike G> class MCTS {
     }
     backup(l.node, P, v);
   }
+  // --- wall-clock deadline --------------------------------------------------------
+  // Arena time controls: an expired deadline stops run() between simulations and
+  // leaves the best-so-far move readable (root children all get preliminary visits
+  // before the deadline can fire -- see run()). Not set by default: zero overhead.
+  void set_deadline(std::chrono::steady_clock::time_point tp) { deadline_ = tp; deadline_set_ = true; }
+  void clear_deadline() { deadline_set_ = false; }
+  bool deadline_expired() const {
+    return deadline_set_ && std::chrono::steady_clock::now() >= deadline_;
+  }
+
   // Synchronous convenience: n simulations, `batch` leaves per evaluator call (virtual loss spreads leaves).
+  // Honours the wall-clock deadline: checked per batch, but only after at least
+  // max(1, #root children) simulations of THIS call, so the search never ends
+  // without visited root children to pick a move from.
   void run(int n, Evaluator<G>& ev, int batch = 1) {
     std::vector<Leaf> leaves; std::vector<State> sts; std::vector<EvalResult<G>> res(batch);
     int done = 0;
     while (done < n) {
+      if (deadline_set_ && done >= std::max(1, (int)nodes_[root_].nchild) &&
+          std::chrono::steady_clock::now() >= deadline_) break;
       leaves.clear(); sts.clear();
       int want = std::min(batch, n - done);
       for (int i = 0; i < want; i++) leaves.push_back(select_leaf());
@@ -114,9 +134,19 @@ template <GameLike G> class MCTS {
   // --- root control --------------------------------------------------------------
   bool root_expanded() const { return nodes_[root_].first_child >= 0; }
   void add_root_noise(Rng& rng) {
-    if (cfg_.dirichlet_alpha <= 0 || !root_expanded()) return;
+    if (!root_expanded()) return;
+    float alpha = cfg_.dirichlet_alpha;
+    if (cfg_.dirichlet_auto) {
+      // Auto alpha: 10 / #root_children (flat-enough noise for small branching
+      // factors like Connect4's 7, where a fixed 0.3 is far too spiky). Noise is
+      // meaningless below 2 children, so it is skipped there.
+      if (nodes_[root_].nchild < 2) return;
+      alpha = 10.0f / (float)nodes_[root_].nchild;
+    } else if (alpha <= 0) {
+      return;
+    }
     Node& r = nodes_[root_]; std::vector<float> d(r.nchild); float sum = 0;
-    std::gamma_distribution<float> g(cfg_.dirichlet_alpha, 1.0f);
+    std::gamma_distribution<float> g(alpha, 1.0f);
     for (auto& x : d) { x = g(rng); sum += x; }
     for (int i = 0; i < r.nchild; i++)
       nodes_[r.first_child + i].prior = (1 - cfg_.dirichlet_eps) * nodes_[r.first_child + i].prior + cfg_.dirichlet_eps * d[i] / sum;
@@ -358,5 +388,7 @@ template <GameLike G> class MCTS {
     nodes_.swap(out); root_ = 0;
   }
   MctsConfig cfg_; std::vector<Node> nodes_; int root_ = 0; State root_state_{}; int forced_root_ = -1;
+  bool deadline_set_ = false;  // wall-clock search deadline (see set_deadline)
+  std::chrono::steady_clock::time_point deadline_{};
 };
 }  // namespace gai

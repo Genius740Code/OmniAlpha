@@ -13,7 +13,16 @@ training: {lr: 0.002, weight_decay: 0.0001, batch_size: 256, steps_per_iter: 30,
   replay_capacity: 200000, mixed_precision: false, max_reuse_ratio: 6.0,
   value_weight: 1.5, anneal_frac: 0.5, anneal_factor: 0.1}
 race: {enabled: false, fraction_of_budget: 0.15, candidates: [{type: resnet, channels: 32, blocks: 3}]}
-eval: {games: 20, sims: 100, promote_if_elo_gain_over: 0, min_confidence_games: 50}
+# eval: promotion gate gets a wall-clock window reserved out of the budget
+# (gate_share; training stops early enough that the gate fits, skipped+logged when
+# nothing fits) and uses elo0=0/elo1=35 so it can actually resolve (~tens of games;
+# 5 Elo never resolved at ~25 Elo SE/200g). tc_ms/tc_a/tc_b are equal-time flags for a
+# build with `evaluate --tc-ms` support; ordered runs a round-robin endgame instead of
+# the gate (see configs/connect4_60m_v9.yaml).
+eval: {games: 20, sims: 100, promote_if_elo_gain_over: 0, min_confidence_games: 50,
+  sprt_elo0: 0.0, sprt_elo1: 35.0, gate_share: 0.1,
+  tc_ms: null, tc_a: null, tc_b: null,
+  ordered: false, roundrobin_last: 5, roundrobin_games: 20}
 clock: {minimum_think_ms: 0, maximum_think_ms: 30000, safety_margin_ms: 100, emergency_ms: 1000}
 search: {min_simulations: 150, target_simulations: 150, max_simulations: 150}
 logging: {dir: logs, format: jsonl}

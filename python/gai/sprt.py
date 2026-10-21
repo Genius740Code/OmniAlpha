@@ -61,3 +61,55 @@ def promote_decision(decision, stats):
     if decision == "accept_h0":
         return False
     return stats.get("w", 0) > stats.get("l", 0)
+
+
+def bradley_terry_elo(names, pair_results, max_iter=500, tol=1e-10, eps=1e-6):
+    """Fit Elo ratings from a full pairwise table with a Bradley-Terry MM iteration.
+
+    Used by the orchestrator's ordered endgame (`eval.ordered`): round-robin the final
+    checkpoints, then rank them by maximum-likelihood strength instead of raw score.
+
+    names: candidate names, index -> name. pair_results: {(i, j): (w_i, l_i, draws)}
+    from i's point of view with i < j. Draws count as half a win for each side
+    (same convention as sprt()). Returns {name: elo} with the played field centred
+    at 0 Elo (geometric mean strength 1); players with no games get 0.0.
+
+    Iteration is Hunter's MM update (Zermelo's algorithm with half-win draws):
+        gamma_i <- W_i / sum_{j != i} n_ij / (gamma_i + gamma_j)
+    which converges monotonically to the MLE. `eps` clamps gamma away from 0 so a
+    winless player stays finite (-inf would poison the whole table).
+    """
+    k = len(names)
+    n_ij = [[0.0] * k for _ in range(k)]
+    w_ij = [[0.0] * k for _ in range(k)]
+    for (i, j), (w, l, d) in pair_results.items():
+        n = w + l + d
+        if n <= 0:
+            continue
+        n_ij[i][j] += n; n_ij[j][i] += n
+        w_ij[i][j] += w + 0.5 * d
+        w_ij[j][i] += l + 0.5 * d
+    played = [sum(n_ij[i]) > 0.0 for i in range(k)]
+    gamma = [1.0] * k
+    for _ in range(max_iter):
+        new = list(gamma)
+        change = 0.0
+        for i in range(k):
+            if not played[i]:
+                continue
+            denom = sum(n_ij[i][j] / (gamma[i] + gamma[j])
+                        for j in range(k) if j != i and n_ij[i][j] > 0.0)
+            if denom <= 0.0:
+                continue
+            new[i] = max(eps, sum(w_ij[i]) / denom)
+            change = max(change, abs(new[i] - gamma[i]) / max(gamma[i], eps))
+        gamma = new
+        if change < tol:
+            break
+    vals = [g for g, p in zip(gamma, played) if p]
+    if vals:
+        geo = math.exp(sum(math.log(max(g, eps)) for g in vals) / len(vals))
+        if geo > 0.0:
+            gamma = [g / geo for g in gamma]
+    return {names[i]: (400.0 * math.log10(max(gamma[i], eps)) if played[i] else 0.0)
+            for i in range(k)}

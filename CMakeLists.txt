@@ -74,6 +74,12 @@ foreach(t validate_game benchmark_game selfplay evaluate play scaling)
   target_link_libraries(${t} PRIVATE gai_engine)
 endforeach()
 
+# ---- classical-search tools (exact solver / oracle labels; see engine/evaluation/solver.hpp) ----
+foreach(t solve_oracle)
+  add_executable(${t} tools/${t}.cpp)
+  target_link_libraries(${t} PRIVATE gai_engine)
+endforeach()
+
 enable_testing()
 foreach(t test_time_manager test_mcts test_ensemble)
   add_executable(${t} tests/${t}.cpp)

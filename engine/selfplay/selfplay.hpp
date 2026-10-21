@@ -20,6 +20,8 @@ struct SelfPlayConfig {
   float temperature = 1.0f;
   bool reuse_tree = true;
   bool enable_shortcuts = true;   // single-move skip + win-in-1 / block-in-1
+  bool tactics2 = false;          // opt-in 2-ply forced-win (win-in-3) root shortcut; see
+                                  // find_forced_win_2ply below
   bool policy_pruning = true;     // KataGo-style: train on pruned target, play on raw visits
   float full_search_prob = 1.0f;  // playout-cap randomization: P(full sims); else cheap
   float cheap_sim_fraction = 0.125f;
@@ -43,7 +45,9 @@ template <GameLike G> struct Sample {
   std::vector<float> input, policy; int player; float value = 0; float full_search = 1.f;
   float q = 0.f;  // search value (root_value) at move time, player-to-move view; for mixing
 };
-template <GameLike G> struct GameRecord { std::vector<Sample<G>> samples; float outcome_p0 = 0; int plies = 0; };
+template <GameLike G> struct GameRecord { std::vector<Sample<G>> samples; float outcome_p0 = 0; int plies = 0;
+  int tactic2_solves = 0;  // positions solved by the 2-ply forced-win shortcut (reporting only)
+};
 
 // Generic win-in-1: move that ends the game with a win for the mover.
 template <GameLike G> bool find_win_in_1(const typename G::State& s, Move* out) {
@@ -76,6 +80,44 @@ template <GameLike G> bool find_block_in_1(const typename G::State& s, Move* out
   return false;
 }
 
+// 2-ply forced win ("win-in-3"): a root move m such that EVERY opponent reply to m
+// leaves us an immediate win-in-1 (or loses/draws on the spot is rejected -- only
+// replies that lose immediately or still lose to our win-in-1 pass). Proven win,
+// no search needed: cost is root_moves * replies * replies win-in-1 scans
+// (Connect4 ~ 7*7*7 ~ 350 cheap apply/legality checks per call).
+template <GameLike G> bool find_forced_win_2ply(const typename G::State& s, Move* out) {
+  Move mv[G::kMaxMoves];
+  int n = G::legal_moves(s, mv);
+  int me = G::current_player(s);
+  for (int i = 0; i < n; i++) {
+    auto t = s;
+    G::apply(t, mv[i]);
+    if (G::is_terminal(t)) {
+      // Ends the game now: a win here is win-in-1's job (kept for standalone use);
+      // a draw/loss is not a forced win.
+      if (G::outcome(t, me) > 0) { *out = mv[i]; return true; }
+      continue;
+    }
+    Move rm[G::kMaxMoves];
+    int rn = G::legal_moves(t, rm);
+    bool forced = rn > 0;
+    for (int j = 0; j < rn && forced; j++) {
+      auto u = t;
+      G::apply(u, rm[j]);
+      if (G::is_terminal(u)) {
+        // Opponent reply that loses on the spot is fine; a draw or an
+        // opponent win means m is refuted.
+        if (G::outcome(u, me) <= 0) forced = false;
+        continue;
+      }
+      Move w;
+      if (!find_win_in_1<G>(u, &w)) forced = false;  // opponent survives our next move
+    }
+    if (forced) { *out = mv[i]; return true; }
+  }
+  return false;
+}
+
 template <GameLike G>
 GameRecord<G> play_selfplay_game(const SelfPlayConfig& cfg, Evaluator<G>& ev, Rng& rng) {
   GameRecord<G> rec; MCTS<G> mcts(cfg.mcts); auto s = G::initial(); mcts.set_root(s);
@@ -100,6 +142,24 @@ GameRecord<G> play_selfplay_game(const SelfPlayConfig& cfg, Evaluator<G>& ev, Rn
       G::apply(s, sc); rec.plies++;
       mcts.set_root(s);
       continue;
+    }
+    // Opt-in 2-ply tactics: proven win-in-3 at the root. Same sample treatment as
+    // the win-in-1 shortcut (one-hot policy target, value-only, certain q); the
+    // search is skipped entirely.
+    if (cfg.tactics2) {
+      Move fw = -1;
+      if (find_forced_win_2ply<G>(s, &fw)) {
+        Sample<G> sm; sm.input.resize(input_size<G>()); sm.policy.resize(G::kActionCount, 0.f);
+        sm.player = G::current_player(s); sm.full_search = 0.f;
+        sm.q = 1.f;  // forced win is certain
+        G::encode(s, sm.input.data());
+        if (fw >= 0 && fw < G::kActionCount) sm.policy[fw] = 1.f;
+        rec.tactic2_solves++;
+        rec.samples.push_back(std::move(sm));
+        G::apply(s, fw); rec.plies++;
+        mcts.set_root(s);
+        continue;
+      }
     }
     bool full = rng.uniform() < cfg.full_search_prob;
     int sims = cfg.simulations;
@@ -234,6 +294,22 @@ std::vector<GameRecord<G>> play_selfplay_lanes(const SelfPlayConfig& cfg, Evalua
         G::apply(t.s, sc); t.rec.plies++;
         t.m.set_root(t.s);
         continue;
+      }
+      // Opt-in 2-ply tactics: identical treatment to play_selfplay_game above.
+      if (cfg.tactics2) {
+        Move fw = -1;
+        if (find_forced_win_2ply<G>(t.s, &fw)) {
+          Sample<G> sm; sm.input.resize(input_size<G>()); sm.policy.resize(G::kActionCount, 0.f);
+          sm.player = G::current_player(t.s); sm.full_search = 0.f;
+          sm.q = 1.f;
+          G::encode(t.s, sm.input.data());
+          if (fw >= 0 && fw < G::kActionCount) sm.policy[fw] = 1.f;
+          t.rec.tactic2_solves++;
+          t.rec.samples.push_back(std::move(sm));
+          G::apply(t.s, fw); t.rec.plies++;
+          t.m.set_root(t.s);
+          continue;
+        }
       }
       t.full = rng.uniform() < cfg.full_search_prob;
       int sims = cfg.simulations;

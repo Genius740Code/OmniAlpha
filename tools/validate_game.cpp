@@ -1,6 +1,7 @@
 // ./build/validate_game --game NAME [--games N] [--seed S]
 // Checks the Game API contract on random playouts + differential test vs reference_game.hpp + undo + symmetries.
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <vector>
 #include "tools/common.hpp"
@@ -13,9 +14,12 @@ template <class T> int run(const Args& a) {
   using G = typename T::Game; using R = typename T::Ref;
   static_assert(GameLike<G>, "Game does not satisfy gai::GameLike (see engine/core/api.hpp)");
   int games = (int)a.num("games", 2000); Rng rng((uint64_t)a.num("seed", 12345));
+  const auto t_start = std::chrono::steady_clock::now();
   const int IN = input_size<G>();
   std::vector<float> e1(IN), e2(IN), e3(IN);
   long wins[2] = {0, 0}, draws = 0, plies = 0; int maxlen = 0; bool non_alternating = false; size_t max_branch = 0;
+  long sum_branch = 0;  // total legal moves over all visited positions (avg branching)
+  bool cap_unterminated = false;  // some random playout hit kMaxGameLength while non-terminal
 
   { auto s = G::initial(); Move mv[G::kMaxMoves];
     CHECK(!G::is_terminal(s), "initial state is terminal");
@@ -27,10 +31,11 @@ template <class T> int run(const Args& a) {
     if constexpr (!std::is_void_v<R>) r = R::initial();
     std::vector<Move> hist; int ply = 0;
     while (!G::is_terminal(s)) {
-      CHECK(ply < G::kMaxGameLength, "game exceeds kMaxGameLength (infinite game?)"); if (ply >= G::kMaxGameLength) break;
+      CHECK(ply < G::kMaxGameLength, "game exceeds kMaxGameLength (infinite game?)"); if (ply >= G::kMaxGameLength) { cap_unterminated = true; break; }
       Move mv[G::kMaxMoves + 1]; int n = G::legal_moves(s, mv);
       CHECK(n > 0 && n <= G::kMaxMoves, "legal move count %d out of [1,%d]", n, G::kMaxMoves); if (n <= 0 || n > G::kMaxMoves) break;
       max_branch = std::max<size_t>(max_branch, n);
+      sum_branch += n;
       for (int i = 0; i < n; i++) { CHECK(mv[i] >= 0 && mv[i] < G::kActionCount, "move %d outside [0,kActionCount)", mv[i]); for (int j = i + 1; j < n; j++) CHECK(mv[i] != mv[j], "duplicate legal move"); }
       int p = G::current_player(s); CHECK(p == 0 || p == 1, "bad player %d", p);
       // determinism + value semantics
@@ -86,6 +91,38 @@ template <class T> int run(const Args& a) {
               std::is_void_v<R> ? "false" : "true", HasUndo<G> ? "true" : "false", G::kNumSymmetries, non_alternating ? "true" : "false");
   if (std::is_void_v<R>) std::printf("NOTE: no reference_game.hpp -> differential test skipped\n");
   std::printf(g_fail ? "VALIDATION FAILED (%d)\n" : "VALIDATION PASSED\n", g_fail);
+
+  // ---- appended game-class diagnostics: random-playout profile + AlphaZero-MCTS
+  // classifier. Purely informational; does not change validation results or exit code.
+  {
+    const double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t_start).count();
+    const double avg_branch = plies > 0 ? (double)sum_branch / (double)plies : 0.0;
+    const double mean_len = games > 0 ? (double)plies / games : 0.0;
+    const double p0_wr = games > 0 ? (double)wins[0] / games : 0.0;
+    const double p1_wr = games > 0 ? (double)wins[1] / games : 0.0;
+    const double dr = games > 0 ? (double)draws / games : 0.0;
+    const bool wide = avg_branch > 35.0;                  // ~35: impractically wide for AZ-MCTS
+    const bool capped = cap_unterminated;                 // random play hit the hard cap while
+    // still non-terminal (NOTE: games that legitimately end at exactly kMaxGameLength
+    // plies - e.g. a board-full draw - terminate normally and do NOT count here)
+    const bool supported = !wide && !capped;
+    std::printf("{\"gameclass\":{\"game\":\"%s\",\"games\":%d,\"avg_branching\":%.3f,"
+                "\"mean_game_length\":%.2f,\"p0_win_rate\":%.4f,\"p1_win_rate\":%.4f,"
+                "\"draw_rate\":%.4f,\"max_game_length\":%d,\"seconds\":%.3f,"
+                "\"az_mcts_supported\":%s}}\n",
+                a.str("game").c_str(), games, avg_branch, mean_len, p0_wr, p1_wr, dr, maxlen,
+                secs, supported ? "true" : "false");
+    if (!supported) {
+      std::printf("*****************************************************************\n");
+      std::printf("WARNING: game class not supported by AlphaZero-MCTS assumptions\n");
+      std::printf("  reason: %s\n", wide ? "avg branching factor > 35 (search space too wide)"
+                                          : "random playouts hit kMaxGameLength "
+                                            "(no terminal state within the bound)");
+      if (wide)
+        std::printf("           hints at chance elements / hidden info / simultaneous moves\n");
+      std::printf("*****************************************************************\n");
+    }
+  }
   return g_fail ? 1 : 0;
 }
 

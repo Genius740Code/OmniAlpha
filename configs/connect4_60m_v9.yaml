@@ -1,0 +1,38 @@
+# 60-min Connect4 v9: fastsmart + methodology fixes (budget-clamped promotion gate,
+# equal-time eval plumbing, ordered Bradley-Terry endgame). See docs/TODO.md.
+budget_minutes: 60
+checkpoint: {interval_minutes: 10}
+selfplay: {games_per_iter: 24, simulations: 150, evaluator: rollout, threads: 2,
+  temperature_moves: 10, dirichlet: 0.3, full_prob: 0.25, cheap_frac: 0.15,
+  forced: 1, prune: 1, shortcuts: 1, augment: true, value_lambda: 0.1,
+  hybrid: 1, nn_start_iter: 5, nn_anneal_iters: 40,
+  batch: 8, lanes: 8, nn_strict: 1,
+  resign_q: -2.0, resign_min_plies: 10}
+network: {type: resnet, channels: 32, blocks: 3}
+training: {lr: 0.002, weight_decay: 0.0001, batch_size: 256, steps_per_iter: 30,
+  replay_capacity: 200000, mixed_precision: false, max_reuse_ratio: 6.0,
+  value_weight: 1.5, anneal_frac: 0.5, anneal_factor: 0.1}
+race: {enabled: false, fraction_of_budget: 0.15, candidates: [{type: resnet, channels: 32, blocks: 3}]}
+# Promotion gate: elo0=0 / elo1=35 resolves in tens of games (5 Elo never resolved at
+# SE ~25 Elo per 200 games and always fell through to the W>L coin flip). gate_share
+# (0.1) RESERVES 10% of the budget as the endgame window: the training loop stops
+# starting iterations once the training window is spent, the gate's game count is what
+# fits in that window, every batch is trimmed to the deadline, and when nothing fits
+# the run publishes without gating (keeping the last 5 checkpoints) instead of
+# overrunning the hour. gate_minutes_per_game / gate_time_safety tune the cost
+# estimate (measured selfplay speed is used when available).
+eval: {games: 20, sims: 100,
+  sprt_elo0: 0.0, sprt_elo1: 35.0, sprt_max_games: 200, sprt_batch_games: 20,
+  gate_share: 0.1,
+  # Equal-time evaluation: tc_ms gives BOTH sides the same wall-clock per move
+  # (needs a build with `evaluate --tc-ms`; forwarded the moment it lands, ignored
+  # while null). tc_a/tc_b set per-side time controls for agent-type races.
+  tc_ms: null, tc_a: null, tc_b: null,
+  # Ordered endgame: instead of the two-engine SPRT gate, the last roundrobin_last
+  # checkpoints (+ the incumbent champion) play a round-robin at equal time
+  # (roundrobin_games per pair, budget-clamped) and the Bradley-Terry Elo winner is
+  # promoted — replaces the coin-flip max_games fallback for the endgame.
+  ordered: true, roundrobin_last: 5, roundrobin_games: 20}
+clock: {minimum_think_ms: 0, maximum_think_ms: 30000, safety_margin_ms: 100, emergency_ms: 1000}
+search: {min_simulations: 150, target_simulations: 150, max_simulations: 150}
+logging: {dir: logs, format: jsonl}

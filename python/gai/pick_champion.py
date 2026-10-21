@@ -89,7 +89,10 @@ def main():
     ap.add_argument("--sims", type=int, default=200)
     ap.add_argument("--sprt-batch-games", type=int, default=20)
     ap.add_argument("--no-sprt", action="store_true", help="disable SPRT early-stop per pair")
-    ap.add_argument("--sprt-elo1", type=float, default=5.0)
+    ap.add_argument("--sprt-elo1", type=float, default=35.0,
+                    help="SPRT H1 margin in Elo (0 vs 35 resolves in tens of games; "
+                         "5 Elo never resolves at ~25 Elo SE/200g and degenerates to "
+                         "the max-games W>L fallback)")
     ap.add_argument("--threads", default="2")
     a = ap.parse_args()
 

@@ -53,10 +53,42 @@ class ReplayBuffer:
         self.x = np.zeros((capacity, planes, h, w), np.float32); self.pi = np.zeros((capacity, actions), np.float32); self.z = np.zeros(capacity, np.float32)
         self.full = np.ones(capacity, np.float32)
     def add(self, x, pi, z, full=None):
-        if full is None: full = np.ones(len(z), np.float32)
-        for i in range(len(z)):
-            self.x[self.pos], self.pi[self.pos], self.z[self.pos], self.full[self.pos] = x[i], pi[i], z[i], full[i]
-            self.pos = (self.pos + 1) % self.cap; self.n = min(self.n + 1, self.cap)
+        """Ring-buffer insert of a whole batch (vectorised slice assignment).
+
+        Semantics identical to the old per-sample Python loop: samples are written at
+        self.pos cyclically, count capped at capacity, pos advances by len(z) mod
+        capacity. Uses at most two contiguous slice assignments per array (no
+        np.concatenate), so wraparound costs two memcpys instead of a Python loop.
+        When len(z) > capacity only the final `cap` samples survive (the ring rewrote
+        the earlier ones in place) but pos still advances by the full len(z).
+        """
+        z = np.asarray(z)
+        n = len(z)
+        if n == 0:
+            return
+        if full is None:
+            full = np.ones(n, np.float32)
+        x = np.asarray(x)[:n]; pi = np.asarray(pi)[:n]; full = np.asarray(full)[:n]
+        advance = n
+        if n > self.cap:  # only the last `cap` samples survive; start where the loop would
+            x, pi, z, full = x[n - self.cap:], pi[n - self.cap:], z[n - self.cap:], full[n - self.cap:]
+            n = self.cap
+            start = (self.pos + advance - n) % self.cap
+        else:
+            start = self.pos
+        end = start + n
+        if end <= self.cap:  # contiguous: one memcpy slice per array
+            self.x[start:end] = x; self.pi[start:end] = pi
+            self.z[start:end] = z; self.full[start:end] = full
+        else:  # wraparound: two memcpy slices
+            first = self.cap - start
+            self.x[start:] = x[:first]; self.pi[start:] = pi[:first]
+            self.z[start:] = z[:first]; self.full[start:] = full[:first]
+            rem = n - first
+            self.x[:rem] = x[first:]; self.pi[:rem] = pi[first:]
+            self.z[:rem] = z[first:]; self.full[:rem] = full[first:]
+        self.pos = (self.pos + advance) % self.cap
+        self.n = min(self.n + advance, self.cap)
     def sample(self, batch, rng=np.random, recency=0.0):
         """Draw `batch` indices and return (x, pi, z, full).
 
