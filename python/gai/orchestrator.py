@@ -27,10 +27,32 @@ def sh_json(cmd):
         raise RuntimeError(f"{' '.join(cmd)} failed: {p.stderr.strip()[-500:]}")
     return json.loads(p.stdout.strip().splitlines()[-1])
 
-def build_supports_nn(build):
-    p = run_cmd([f"{build}/selfplay", "--game", "connect4", "--games", "1", "--sims", "2",
-                 "--out", "/tmp/gai_nn_probe.bin", "--evaluator", "nn:/tmp/nonexistent.ts"])
+def build_supports_nn(build, game):
+    """Probe the C++ build for NN-evaluator support. MUST probe the actual game:
+    support is per-registered-game (game headers are compiled in per directory),
+    so a connect4-only probe lies about any other game and would poison the
+    whole run's evaluator-switch decision."""
+    p = run_cmd([f"{build}/selfplay", "--game", game, "--games", "1", "--sims", "2",
+                 "--out", "/tmp/opencode/gai_nn_probe.bin", "--evaluator", "nn:/tmp/nonexistent.ts"])
     return p.returncode == 0
+
+def compute_effective_steps(steps_per_iter, fresh_positions, batch_size,
+                            max_reuse_ratio, buffered_positions):
+    """Update-to-data clamp (v9 starvation regression guard, now unit-tested).
+
+    steps_per_iter is capped so (steps * batch) / fresh_positions <=
+    max_reuse_ratio, where fresh_positions is the ACTUAL number of train
+    positions added to the buffer this iteration (post holdout-split, post
+    augmentation). Using the raw selfplay count here starved training
+    11.3 -> 8 steps/iter in v9 (augmentation roughly doubles the denominator),
+    which inverted the 1m-vs-10m lineage. Guard: a clamp to 0 still trains one
+    step when the buffer can already fill a batch, so tiny early iterations
+    cannot silently stall.
+    """
+    max_allowed = int(max_reuse_ratio * fresh_positions / batch_size)
+    if max_allowed <= 0 and buffered_positions >= batch_size:
+        max_allowed = 1
+    return min(steps_per_iter, max_allowed)
 
 def _eval_extra_flags(ev_cfg):
     """Extra flags for the C++ evaluate tool (equal-time evaluation plumbing).
@@ -359,16 +381,17 @@ def main():
     endgame_enabled = bool(ev0.get("sprt", True) or ev0.get("ordered", False))
     gate_reserve_s = budget * float(ev0.get("gate_share", 0.1)) if endgame_enabled else 0.0
     train_budget = budget - gate_reserve_s
-    from .train import make_trainer, save_checkpoint, export_torchscript
+    from .train import (make_trainer, save_checkpoint, export_torchscript,
+                        setup_torch_threads, cosine_lr, ema_export)
     t0 = time.time()
     def phase(msg):
         if dry:
             print(f"[dry-run t=+{time.time() - t0:.1f}s] {msg}")
     dry_max_iters = 2 if dry else None
-    nn_ok = build_supports_nn(a.build)
+    nn_ok = build_supports_nn(a.build, a.game)
     print(f"build nn support: {nn_ok}")
     phase(f"build nn support: {nn_ok}")
-    next_ck = ck_every; buf = None; net = opt = step = None
+    next_ck = ck_every; buf = None; net = opt = step = None; ema = None
     log = open(os.path.join(a.out, "log.jsonl"), "a"); it = 0
     shape = None
     champ_ts = None
@@ -476,17 +499,21 @@ def main():
         if sp.get("augment", False):
             from .data import maybe_mirror_batch
             train_x, train_pi, train_z, train_full = maybe_mirror_batch(
-                train_x, train_pi, train_z, train_full)
+                train_x, train_pi, train_z, train_full, game=a.game)
         if buf is None:
-            buf = ReplayBuffer(cfg["training"]["replay_capacity"], shape["planes"], shape["h"], shape["w"], shape["actions"])
+            tr0 = cfg["training"]
+            buf = ReplayBuffer(cfg["training"]["replay_capacity"], shape["planes"], shape["h"], shape["w"], shape["actions"],
+                               track_dups=float(tr0.get("dup_weight", 0.0)) > 0.0)
             tr = cfg["training"]
-            net, opt, step, set_lr = make_trainer(
+            setup_torch_threads(tr.get("num_threads", 0))
+            net, opt, step, set_lr, ema = make_trainer(
                 cfg["network"], shape, tr["lr"], tr.get("weight_decay", 1e-4),
                 tr.get("mixed_precision", True),
                 value_weight=tr.get("value_weight", 1.0),
                 grad_clip=tr.get("grad_clip", 0.0),
                 optimizer=tr.get("optimizer", "adamw"),
-                momentum=tr.get("momentum", 0.9))
+                momentum=tr.get("momentum", 0.9),
+                ema_decay=tr.get("ema_decay", 0.0))
             base_lr = tr["lr"]
             annealed = False
         # (split already done above, before augmentation)
@@ -521,12 +548,9 @@ def main():
         max_reuse_ratio = cfg["training"].get("max_reuse_ratio", 3.0)
         fresh_positions = len(train_z)
         batch_size = cfg["training"]["batch_size"]
-        max_allowed_steps = int(max_reuse_ratio * fresh_positions / batch_size)
-        # Guard: tiny batches (e.g. early iters) must still train at least 1 step
-        # when the buffer holds a full batch; 0-step iters silently stall learning.
-        if max_allowed_steps <= 0 and buf.n >= batch_size:
-            max_allowed_steps = 1
-        effective_steps = min(cfg["training"]["steps_per_iter"], max_allowed_steps)
+        effective_steps = compute_effective_steps(cfg["training"]["steps_per_iter"],
+                                                   fresh_positions, batch_size,
+                                                   max_reuse_ratio, buf.n)
         # LR schedule: cosine decay over the training window (default when
         # lr_schedule: cosine) — training ends at budget - gate_reserve, so the decay
         # must bottom out there, not at the full budget. Else legacy one-shot drop in
@@ -535,14 +559,10 @@ def main():
         tr = cfg["training"]
         if tr.get("lr_schedule", "") == "cosine":
             frac = min(1.0, el_pre / train_budget)
-            warm = tr.get("warmup_frac", 0.03)
-            if frac < warm and warm > 0:
-                lr_now = base_lr * (frac / warm)
-            else:
-                lr_now = base_lr * (0.02 + 0.98 * 0.5 * (1.0 + math.cos(math.pi * frac)))
-            set_lr(lr_now)
+            set_lr(cosine_lr(base_lr, frac, warmup_frac=tr.get("warmup_frac", 0.03),
+                             min_lr_frac=tr.get("min_lr_frac", 0.02)))
             if int(el_pre) % 600 < 12:
-                print(f"cosine lr {lr_now:.6f} at el={el_pre:.0f}s frac={frac:.2f}")
+                print(f"cosine lr {opt.param_groups[0]['lr']:.6f} at el={el_pre:.0f}s frac={frac:.2f}")
         elif (tr.get("anneal_frac", 0) > 0 and not annealed
                 and el_pre > train_budget * (1.0 - tr["anneal_frac"])):
             set_lr(base_lr * tr.get("anneal_factor", 0.1))
@@ -550,15 +570,21 @@ def main():
             print(f"anneal: lr {base_lr} -> {base_lr * tr.get('anneal_factor', 0.1)} at el={el_pre:.0f}s")
         # Train for effective_steps
         rec_w = tr.get("recency_weight", 0.0)
+        dup_w = tr.get("dup_weight", 0.0)
         losses = {}
+        t_train0 = time.time()
         for _ in range(effective_steps):
             try:
-                losses = step(*buf.sample(batch_size, recency=rec_w))
+                losses = step(*buf.sample(batch_size, recency=rec_w, dup_weight=dup_w))
             except TypeError:
                 xb, pib, zb = buf.sample(batch_size, recency=rec_w)[:3]
                 losses = step(xb, pib, zb)
+        train_s = time.time() - t_train0
+        sp_s = float(stats.get("seconds", 0.0) or 0.0)
+        samples_s = (effective_steps * batch_size / train_s) if train_s > 0 else 0.0
         el = time.time() - t0
-        phase(f"iter {it}: trained {effective_steps} step(s)")
+        phase(f"iter {it}: trained {effective_steps} step(s) in {train_s:.2f}s "
+              f"(selfplay {sp_s:.1f}s, {samples_s:.0f} samples/s)")
         log.write(json.dumps(dict(iter=it, elapsed_s=round(el, 1), selfplay=stats,
                                 replay=buf.n,
                                 heldout_policy=heldout_policy_loss,
@@ -566,11 +592,28 @@ def main():
                                 effective_steps=effective_steps,
                                 max_reuse_ratio=max_reuse_ratio,
                                 recency_weight=rec_w,
+                                dup_weight=dup_w,
+                                train_s=round(train_s, 3),
+                                selfplay_s=round(sp_s, 2),
+                                samples_per_s=round(samples_s, 1),
+                                torch_threads=torch.get_num_threads(),
                                 fresh_positions=fresh_positions,
                                 evaluator=ev, alpha=round(alpha, 3),
                                 **losses)) + "\n")
         log.flush(); it += 1
         save_checkpoint(net, os.path.join(a.out, "latest.pt"))
+        if el >= next_ck:
+            ck = os.path.join(a.out, f"checkpoint_{int(next_ck // 60)}m.pt")
+            save_checkpoint(net, ck); next_ck += ck_every
+            # EMA twin of the checkpoint (training.ema_decay>0): written at checkpoint
+            # cadence, not every iter — export costs 30-190 ms and EMA moves slowly.
+            if ema is not None:
+                try:
+                    ema_export(ema, net, shape,
+                               os.path.join(a.out, "latest_ema.pt"),
+                               os.path.join(a.out, "latest_ema.ts"))
+                except Exception as e:
+                    print(f"ema export failed (continuing without it): {e}")
         try:
             export_torchscript(net, shape, latest_ts)
         except Exception as e:
@@ -598,6 +641,13 @@ def main():
             except Exception as e:
                 print(f"arena failed: {e}")
     save_checkpoint(net, os.path.join(a.out, "latest.pt"))
+    if ema is not None and shape is not None:
+        try:  # fresh EMA twin for the endgame / post-hoc comparison
+            ema_export(ema, net, shape,
+                       os.path.join(a.out, "latest_ema.pt"),
+                       os.path.join(a.out, "latest_ema.ts"))
+        except Exception as e:
+            print(f"final ema export failed (continuing): {e}")
     # SPRT-gated champion promotion: only replace the champion when latest.ts is
     # confirmed stronger by the sequential test; otherwise keep the incumbent.
     # First run (no champion.ts yet) promotes unconditionally.
