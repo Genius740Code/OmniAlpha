@@ -73,3 +73,34 @@ cmake -S . -B build && cmake --build build -j && (cd build && ctest)
 ./build/play --game connect4 --p0 human --p1 mcts --tc 60+1
 cd python && python -m gai.orchestrator --config ../configs/competition_60m.yaml --game connect4 --minutes 2   # untested
 ```
+
+## 2026-10-21: Elo-methodology fix batch — partial, finish here
+
+Three GLM-5.3 subagents dispatched (equal-time MCTS + Dirichlet auto + 2-ply tactics; Python SPRT/replay/plumbing; Connect4 solver + alpha-beta agent). Two completed, one aborted mid-task. Nothing committed yet — all work is uncommitted working-tree changes. `bots/meridian/*` and `docs/meridian/TRAINING_FAST.md` changes are SEPARATE user work, do not touch.
+
+### DONE (completed subagents)
+- **Equal-time arenas** (`engine/mcts/mcts.hpp`, `tools/evaluate.cpp`): `--tc-ms N` (equal clock both agents), `--tc-a/--tc-b` (race), measured `ms_move_*_mean/p95` in JSON. `MCTS::set_deadline()` checked per batch after ≥1 sim. Sims-only behavior repro'd exactly.
+- **Dirichlet auto** (`mcts.hpp`, `tools/selfplay.cpp`): `--dirichlet <= 0` now means AUTO = 10/#root_children per root. NOTE the semantic change: 0 is no longer "noise off"; do it programmatically via `dirichlet_alpha=0, dirichlet_auto=false`.
+- **2-ply tactics** (`engine/selfplay/selfplay.hpp`): `find_forced_win_2ply<G>()`, `--tactics2 1` (default OFF), `GameRecord::tactic2_solves`. Verified vs depth-3 negamax: 2794/2794 agreement.
+- **Python** (`orchestrator.py`, `data.py`, `pick_champion.py`, `sprt.py`): SPRT gate budget-clamped and reserved inside the hour (new keys `eval.sprt_elo1` default 35.0, `gate_share` 0.1, `gate_minutes_per_game`, `gate_time_safety`); equal-time eval plumbing (`eval.tc_ms/tc_a/tc_b`, ≥20 ms); `eval.ordered` + `eval.roundrobin_last` Bradley-Terry endgame (`bradley_terry_elo()` in sprt.py); `ReplayBuffer.add` vectorised (bit-identical); new `configs/connect4_60m_v9.yaml`; `--dry-run` timeline flag. `pytest python/tests -q` → 46 passed. `solve_oracle` + new files compile clean.
+
+### Build note
+`cmake` is not on PATH in this sandbox. Use `pip install cmake` or the absolute path `$HOME/.local/lib/python3.10/site-packages/cmake/data/bin/cmake`.
+### Verify commands
+  - `./build/evaluate --game connect4 --games 8 --tc-ms 20`
+  - `./build/selfplay --game connect4 --games 4 --sims 32 --tactics2 1`
+  - `./build/solve_oracle --game connect4 --solve-initial`
+  - `./build/solve_oracle --game connect4 --positions 200 --out /tmp/opencode/labels_test.bin`
+  - `./build/validate_game --game connect4`
+  - `python -m pytest python/tests -q`
+- Solver compartment: engine/evaluation/{solver.hpp, ab_agent.hpp}, tools/solve_oracle.cpp already created, CMake target builds.
+
+### TODO to finish (resume subagent C or take over hand-crafted):
+1. **Verify solver.hpp exactness**: `--solve-initial` must report P0 win (center), print nodes/seconds; deadline: <60 s (optimize ordering / bitboard TT if >120 s).
+2. **Oracle labels**: `--positions 200 --out /tmp/opencode/labels_test.bin` must run <3 min and write the binary layout {hash, value_from_p0, best_move}; then wire the labels into checkpoint eval as an optimal-move-rate gate (next agent's choice).
+3. **Wire ab_agent into arena**: `evaluate.cpp` does NOT have an `ab:` agent type yet; add `--evaluator-a ab:depth=D:ms=M` (select_move per move at equal `--tc-ms`), consistent JSON key on names for winner attribution.
+4. **Race agent types**: new config `race.enabled 1` candidates now: `[rollout]`, `[nn]`, `[ab:...]` at equal tc; orchestrator must allow agent-type candidates, not just architectures.
+5. **Configs**: refresh `configs/connect4_60m_v9.yaml` with `dirichlet: 0` (auto), `eval.tc_ms: 30`, `eval.ordered: true`, `tactics2` A/B flag, race enabled. Also update `docs/REUSE.md` probe note about `--dirichlet 0` semantic change.
+6. **Docs**: update README + docs/TODO.md status tables to reflect shipped items above (equal-time, SPRT 35, vectorised replay, dry-run, solver files present).
+7. **Tests**: add C++ tests for `find_forced_win_2ply` and deadline-API; keep existing green.
+8. **Known caveats from agent A**: policy-target floats differ ~1 ULP from pristine binary in prune=1 path (compiler FP-contraction, not logic); p95 slightly > tc due to chunk granularity; `--sims` default when tc-only raises to 2e6 cap.
