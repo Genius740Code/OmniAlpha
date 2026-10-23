@@ -168,3 +168,15 @@ time available → serving sims can be WORLD-CLASS: 600-1200 sims/move is afford
 - A/B/C role split: keep working-tree changes non-overlapping (one agent owns engine/**,
   one owns tools/**, one owns configs/**+python/**). ctest + pytest must stay green.
   Every change: measure first (ruler/suite A/B), kill on no win (protocol: docs/TODO.md).
+
+## 2026-10-23 measured: lanes plateau + GPU verdict (jam-critical)
+- Selfplay throughput sweep, connect4, nn:models/latest.ts, 2 threads, 600 games:
+  lanes 8/batch 16 (v9) = 56.6 gps → **lanes 96-128 / batch 48 = ~180 gps (3.2×)**.
+  Plateau: lanes 96/128 both ≈180; batch 48 > 64 within noise. Any jam run uses
+  `--lanes 96 --batch 48` (or via yaml selfplay.lanes 96 / batch 48).
+- CUDA torch 2.14.1+cu126 installed (cuda available True). Existing build-lt binary
+  loads it fine (soname compat). GPU TRAINING measured 7.7× faster (91 vs 12 steps/s
+  for resnet32 batch 256). GPU INFERENCE is 10× SLOWER on GTX1650 4GB at connect4 net sizes
+  (evaluate 8× slower; selfplay 6.5 gps vs 180): do NOT set GAI_NN_DEVICE=cuda for
+  selfplay/serve — CPU inference through big lane batches wins outright.
+- Jam winner combination: CPU lanes96 + GPU resnet training pass.
