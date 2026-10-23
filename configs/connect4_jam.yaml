@@ -1,0 +1,51 @@
+# JAM config: Strat Jam hard-mode — 50-min training -> live 20-min game at TC 2+15.
+# Base: configs/connect4_60m_v9.yaml. Every value is either jam-spec, the docs/TODO.md
+# scorecard winner, or an unchanged v9 value (no invented settings).
+#
+# Deviations from v9 and why (see docs/round/JAM_TRAINING.md for the full minutes math):
+# - budget 50 (jam format), checkpoint interval 5 (candidate per 5 min, last 5 kept).
+# - dirichlet 0 = AUTO (10/#root_children) per the Oct-21 semantic change (v9 had 0.3 fixed).
+# - resign_q -0.90 + resign_probe 0.15: jam spec (v9 had -2.0 = resign off); verify
+#   false_resign_rate < ~5% from the selfplay JSON before trusting it.
+# - tactics2 1: jam spec (2-ply forced-win shortcut, default OFF engine-side).
+# - value_weight 2.0: vw2 is the docs/TODO.md CHAMPION row (best @50, +70 vs v10);
+#   v9's 1.5 predates that result.
+# - training.dup_weight 1.0 + num_threads 2 (ResNet) + mixed_precision false (CPU):
+#   jam spec. GPU handoff: if the final run goes out on build-lt rebuilt against cu126
+#   torch (GTX 1650 Ti present), keep num_threads 2 (ResNet); fp16 AMP stays OFF —
+#   GTX 16xx has no tensor cores, mixed_precision true would slow it down.
+# - eval.games 6 (v9: 20): the mid-run checkpoint arena runs at tc_ms 300 where a game
+#   costs ~10-13 s — 20 games would burn ~3.5 min of every 5-min checkpoint window.
+# - eval.gate_share 0.15 (v9: 0.1): the ordered endgame needs gpp >= 2 games/pair.
+#   At 300 ms/move a game costs ~0.19 min; the 5-min window fits only ~26 games, which
+#   is < 2 per pair over 15 pairs (6 candidates) -> tournament auto-skips. 7.5 min fits
+#   ~30 games (~2/pair) with ~90 s of trim margin.
+# - eval.roundrobin_games 16 (v9: 20): jam spec; budget-clamped anyway.
+budget_minutes: 50
+checkpoint: {interval_minutes: 5}
+selfplay: {games_per_iter: 48, simulations: 150, evaluator: rollout, threads: 2,
+  temperature_moves: 10, dirichlet: 0, full_prob: 0.25, cheap_frac: 0.15,
+  forced: 1, prune: 1, shortcuts: 1, tactics2: 1, augment: true, value_lambda: 0.1,
+  hybrid: 1, nn_start_iter: 5, nn_anneal_iters: 40,
+  batch: 8, lanes: 8, nn_strict: 1,
+  resign_q: -0.90, resign_min_plies: 10, resign_probe: 0.15}
+network: {type: resnet, channels: 32, blocks: 3}
+training: {lr: 0.002, weight_decay: 0.0001, batch_size: 256, steps_per_iter: 60,
+  replay_capacity: 200000, mixed_precision: false, max_reuse_ratio: 6.0,
+  value_weight: 2.0, dup_weight: 1.0, num_threads: 2,
+  anneal_frac: 0.5, anneal_factor: 0.1}
+race: {enabled: false, fraction_of_budget: 0.15, candidates: [{type: resnet, channels: 32, blocks: 3}]}
+# Promotion gate: elo0=0 / elo1=35 resolves in tens of games (see v9 notes).
+# gate_share RESERVES the endgame window out of the budget; gate_time_safety is tuned
+# so the selfplay-speed-based minutes/game estimate lands near the tc_ms-300 reality
+# (~0.19 min/game at ~120 NN sims per 300 ms move on 2 CPU cores) — the estimator
+# cannot see tc_ms, so the safety factor carries the correction. Re-measure after the
+# pilot; if selfplay games_per_s drifts, adjust this knob, not the plan.
+eval: {games: 6, sims: 100,
+  sprt_elo0: 0.0, sprt_elo1: 35.0, sprt_max_games: 200, sprt_batch_games: 20,
+  gate_share: 0.15, gate_time_safety: 1.5,
+  tc_ms: 300, tc_a: null, tc_b: null,
+  ordered: true, roundrobin_last: 5, roundrobin_games: 16}
+clock: {minimum_think_ms: 0, maximum_think_ms: 30000, safety_margin_ms: 100, emergency_ms: 1000}
+search: {min_simulations: 150, target_simulations: 150, max_simulations: 150}
+logging: {dir: logs, format: jsonl}

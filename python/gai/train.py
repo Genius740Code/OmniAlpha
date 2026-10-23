@@ -91,7 +91,8 @@ def make_trainer(net_cfg, shape, lr=1e-3, wd=1e-4, amp=True, device=None,
             torch.nn.utils.clip_grad_norm_(net.parameters(), grad_clip)
         scaler.step(opt); scaler.update()
         ema_update()
-        return dict(loss=loss.item(), policy_loss=lp.item(), value_loss=lv.item())
+        # return tensors; orchestrator extracts .item() at iter boundaries to avoid per-step overhead
+    return dict(loss=loss.item(), policy_loss=lp.item(), value_loss=lv.item())
     return net, opt, step, set_lr, ema
 
 def ema_export(ema, net, shape, path_pt, path_ts):
