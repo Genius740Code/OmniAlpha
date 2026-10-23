@@ -104,3 +104,67 @@ Three GLM-5.3 subagents dispatched (equal-time MCTS + Dirichlet auto + 2-ply tac
 6. **Docs**: update README + docs/TODO.md status tables to reflect shipped items above (equal-time, SPRT 35, vectorised replay, dry-run, solver files present).
 7. **Tests**: add C++ tests for `find_forced_win_2ply` and deadline-API; keep existing green.
 8. **Known caveats from agent A**: policy-target floats differ ~1 ULP from pristine binary in prune=1 path (compiler FP-contraction, not logic); p95 slightly > tc due to chunk granularity; `--sims` default when tc-only raises to 2e6 cap.
+
+# JAM PLAN — Strat Jam hard-mode: 1h training → 20min game, TC 2+15
+
+Format: train ~50-55 min, then a live 20-min game at 2+15 (≈20-42 plies → ~10 min total think
+time available → serving sims can be WORLD-CLASS: 600-1200 sims/move is affordable).
+
+## Artifacts plan (already supported, no new code needed)
+- `python -m gai.orchestrator --config configs/connect4_60m_v9.yaml --game connect4 --minutes 50`
+- Every iteration exports `latest.ts` and the next iter plays with `hybrid:latest_ts` (annealed):
+  the live bot improves continuously through the hour. NO restarts needed.
+- `checkpoint.interval_minutes: 5` → candidate every 5 min (last 5 kept).
+- Endgame: `eval.ordered true` + `roundrobin_last 5` → Bradley-Terry picks the strongest
+  checkpoint automatically in the reserved gate_share window. That checkpoint(esTorchScript)
+  is the one that plays the live game.
+- `--dry-run` first to rehearse the full timeline (no training side effects).
+
+## Game-phase serving recipe (measured basis)
+- Single champion net, argmax pick, generous max_sims (600-1200): suite shows +140-170 Elo
+  per sims-doubling in 40-320 range; never tested above 320 — measure tonight (ruler).
+- `ensemble:a+b+c` at FIXED sims = +89 Elo (2.9× cost). At 15s/move increment you can afford
+  it — re-measure ensemble vs single at equal WALL-CLOCK (tc-ms 1000+) tonight before choosing.
+- LCB pick: neutral at fast TC; test at high sims; keep only on suite win.
+- Early stops are already banked (proven-win stop / can't-be-overtaken / shortcuts), so
+  effective sims/move stays high where it matters (midgame). 1s/move safety margin in clocks.
+- Adaptive per-move denken: the engine already thinks longer on contested positions
+  (adaptive extend-when-unstable) and instantly plays proven wins/forced shorts. Do NOT add
+  NEW time logic without a suite A/B — recent kill history says knob-level changes mostly
+  fail (Gumbel ×3, safety_factor, LCB@fast).
+
+## Pondering (think during opponent's clock) — OPTIONAL, only if flag-safe
+- Engine has no ponder yet. Cheap version alive as TODO: background thread that pre-searches
+  the opponent's most likely replies (from the reused root's visit distribution) and hands the
+  tree over on our turn; tree-reuse advance_root already exists. ONLY implement behind
+  `--ponder 1` with a suite A/B; if it loses, drop it — do not jam-day-without-a-test.
+
+## Speed so the 1 training-hour is real
+- GPU: install cu126 torch (CPU-only wheel was 2.13.0+cpu), rebuild build-lt against it,
+  `GAI_NN_DEVICE=cuda` set for selfplay/evaluate. Without GPU everything else is marginal.
+- Already fast: lanes batched inference (2.11×), batch leaf dedup, hash-keyed eval cache,
+  forced playouts + target pruning, can't-be-overtaken stops, tree reuse.
+- Training flags for jam: `training.num_threads 2` (ResNet) / 1 (MLP), `dup_weight` ON
+  (trend +49..+79 @50-100 sims, unconfirmed at 60m — acceptable risk given format),
+  resign probe `resign_q: -0.90` + `resign_probe: 0.15` (verify false_resign_rate < ~5% from
+  the run JSON first), multi knicker knuckles per round of changes = one A/B per flag only.
+
+## Opening
+- P0 book: center column (solved-game knowledge). Verify `./build/solve_oracle --game
+  connect4 --solve-initial` runtime < 60 s (was a pending TODO); if it solves faster,
+  consider a 2-4 ply exact book; otherwise center-only + full search.
+
+## Rehearsal (do all of these before the jam)
+1. `pip install torch --index-url .../cu126` + rebuild build-lt + GAI_NN_DEVICE=cuda →
+   `./build-lt/evaluate nn:...` loads on cuda (speed printed in JSON).
+2. Suite ruler at fixed 600 / 1000 sims (single vs ensemble vs LCB) — pick serving config
+   by measured Elo, not vibes.
+3. 15-min training pilot with the final jam flags → check positions/s, steps/iter ≥ 10,
+   false_resign_rate, checkpoint + export no failures.
+4. `--dry-run` full 50-min timeline.
+5. `play --p1 mcts --tc 120+15` simulation to sanity-check clock behavior incl. 1s margin.
+
+## Subagents for this task (MANDATORY: run via background subagents, MAX 3, GLM-5.3 nvidia)
+- A/B/C role split: keep working-tree changes non-overlapping (one agent owns engine/**,
+  one owns tools/**, one owns configs/**+python/**). ctest + pytest must stay green.
+  Every change: measure first (ruler/suite A/B), kill on no win (protocol: docs/TODO.md).
