@@ -65,6 +65,11 @@ template <GameLike G> class MCTS {
     G::apply(root_state_, m);
     if (c < 0) { set_root(root_state_); return; }
     root_ = c; nodes_[c].parent = -1; forced_root_ = -1;
+    // `proven` is stored mover-view for non-root nodes, but the root follows the
+    // player-to-move convention (backup()'s root pass and every root_proven()
+    // reader: adaptive_search early-stop, the Gumbel root shortcut). The player
+    // to move flips when we descend, so flip the sign; draws (2) are symmetric.
+    if (nodes_[c].proven == 1 || nodes_[c].proven == -1) nodes_[c].proven = -nodes_[c].proven;
     if (nodes_.size() > cfg_.max_nodes) compact();
   }
 
@@ -116,6 +121,7 @@ template <GameLike G> class MCTS {
   // without visited root children to pick a move from.
   void run(int n, Evaluator<G>& ev, int batch = 1) {
     std::vector<Leaf> leaves; std::vector<State> sts; std::vector<EvalResult<G>> res(batch);
+    std::vector<State> ust; std::vector<Hash> uh; std::vector<EvalResult<G>> ur; std::vector<int> own;
     int done = 0;
     while (done < n) {
       if (deadline_set_ && done >= std::max(1, (int)nodes_[root_].nchild) &&
@@ -124,7 +130,26 @@ template <GameLike G> class MCTS {
       int want = std::min(batch, n - done);
       for (int i = 0; i < want; i++) leaves.push_back(select_leaf());
       for (auto& l : leaves) if (!l.terminal) sts.push_back(l.state);
-      if (!sts.empty()) ev.evaluate(sts.data(), res.data(), (int)sts.size());
+      if (!sts.empty()) {
+        // Batch dedup: leaves that reached the same position (transpositions via
+        // different tree paths, or the same unexpanded node picked twice before
+        // expansion) evaluate once and the result fans out to every duplicate.
+        // Keyed by G::hash -- the same collision risk CachingEvaluator already
+        // accepts; the O(n^2) scan beats a hash map at typical batch sizes.
+        own.assign(sts.size(), -1); uh.clear(); ust.clear();
+        for (size_t i = 0; i < sts.size(); i++) {
+          Hash h = G::hash(sts[i]);
+          for (size_t j = uh.size(); j-- > 0;)
+            if (uh[j] == h) { own[i] = (int)j; break; }
+          if (own[i] < 0) { own[i] = (int)uh.size(); uh.push_back(h); ust.push_back(sts[i]); }
+        }
+        if (ust.size() == sts.size()) ev.evaluate(sts.data(), res.data(), (int)sts.size());
+        else {
+          ur.assign(ust.size(), EvalResult<G>{});
+          ev.evaluate(ust.data(), ur.data(), (int)ust.size());
+          for (size_t i = 0; i < sts.size(); i++) res[i] = ur[own[i]];
+        }
+      }
       int k = 0;
       for (auto& l : leaves) finish_leaf(l, l.terminal ? nullptr : &res[k++]);
       done += want;

@@ -47,6 +47,9 @@ template <GameLike G> struct Sample {
 };
 template <GameLike G> struct GameRecord { std::vector<Sample<G>> samples; float outcome_p0 = 0; int plies = 0;
   int tactic2_solves = 0;  // positions solved by the 2-ply forced-win shortcut (reporting only)
+  int resign_probes = 0;      // hopeless positions that played on (resign_probe calibration)
+  int resign_probe_wins = 0;  // probes whose would-be resigner ended up WINNING (false resigns)
+  std::vector<int8_t> probe_resigners;  // would-be resigner per probe; scored at game end
 };
 
 // Generic win-in-1: move that ends the game with a win for the mover.
@@ -128,7 +131,10 @@ GameRecord<G> play_selfplay_game(const SelfPlayConfig& cfg, Evaluator<G>& ev, Rn
     // Tier-A cheap shortcuts: no search, value-only targets.
     if (cfg.enable_shortcuts && nm == 1) {
       G::apply(s, mv[0]); rec.plies++;
-      mcts.set_root(s);
+      // Reuse the live tree: advance into the forced move's subtree instead of
+      // discarding it (same pattern as the searched-move path below). advance_root
+      // applies mv[0] to the tree's root_state_ itself -- s was advanced above.
+      if (cfg.reuse_tree) mcts.advance_root(mv[0]); else mcts.set_root(s);
       continue;  // forced move teaches nothing about preference: emit no sample
     }
     Move sc = -1; bool is_win = false;
@@ -140,7 +146,7 @@ GameRecord<G> play_selfplay_game(const SelfPlayConfig& cfg, Evaluator<G>& ev, Rn
       if (sc >= 0 && sc < G::kActionCount) sm.policy[sc] = 1.f;
       rec.samples.push_back(std::move(sm));
       G::apply(s, sc); rec.plies++;
-      mcts.set_root(s);
+      if (cfg.reuse_tree) mcts.advance_root(sc); else mcts.set_root(s);  // keep the subtree
       continue;
     }
     // Opt-in 2-ply tactics: proven win-in-3 at the root. Same sample treatment as
@@ -157,7 +163,7 @@ GameRecord<G> play_selfplay_game(const SelfPlayConfig& cfg, Evaluator<G>& ev, Rn
         rec.tactic2_solves++;
         rec.samples.push_back(std::move(sm));
         G::apply(s, fw); rec.plies++;
-        mcts.set_root(s);
+        if (cfg.reuse_tree) mcts.advance_root(fw); else mcts.set_root(s);  // keep the subtree
         continue;
       }
     }
@@ -167,6 +173,13 @@ GameRecord<G> play_selfplay_game(const SelfPlayConfig& cfg, Evaluator<G>& ev, Rn
       sims = std::max(cfg.cheap_min_sims, (int)(cfg.simulations * cfg.cheap_sim_fraction));
     }
     int have = mcts.root_expanded() ? mcts.total_visits() : 0;
+    // Root expansion as a batch of 1. Deliberately NOT folded into the next batched
+    // run(): folding would drop the +1 visit this adds on fresh roots (sims+1 -> sims,
+    // shifting every trained-on visit distribution) and fill the first batch with
+    // duplicate root leaves. Measured cost instead: exactly 1 single-state evaluator
+    // call per searched position on top of ~sims leaf evals (~1.6% at 64 sims, less
+    // at higher sims; with reuse_tree the carried visits shrink the batched part, so
+    // the fraction rises on reused roots -- revisit if profiling shows it hot).
     if (!mcts.root_expanded()) mcts.run(1, ev, 1);
     Sample<G> sm; sm.input.resize(input_size<G>()); sm.policy.resize(G::kActionCount); sm.player = G::current_player(s);
     sm.full_search = full ? 1.f : 0.f;
@@ -201,13 +214,18 @@ GameRecord<G> play_selfplay_game(const SelfPlayConfig& cfg, Evaluator<G>& ev, Rn
       m = mcts.sample_move(rec.plies < cfg.temperature_moves ? cfg.temperature : 0.f, rng);
     }
     sm.q = mcts.root_value();  // search root-value at move time, for value-target mixing
-    // Calibrated resignation: hopeless full-search positions end now (probe fraction plays on
-    // to measure the false-resign rate); loser = player to move.
+    // Calibrated resignation: hopeless full-search positions end now; the probe
+    // fraction plays on so the false-resign rate can be scored at game end.
+    // Loser = player to move.
     if (!resigned && cfg.resign_q > -1.5f && full && rec.plies >= cfg.resign_min_plies
-        && mcts.best_child_q() < cfg.resign_q && rng.uniform() >= cfg.resign_probe) {
-      resigned = true; resign_loser = sm.player;
-      rec.samples.push_back(std::move(sm));
-      break;
+        && mcts.best_child_q() < cfg.resign_q) {
+      if (rng.uniform() >= cfg.resign_probe) {
+        resigned = true; resign_loser = sm.player;
+        rec.samples.push_back(std::move(sm));
+        break;
+      }
+      // Probe: play this one out. Scored below once the game outcome is final.
+      rec.resign_probes++; rec.probe_resigners.push_back((int8_t)sm.player);
     }
     rec.samples.push_back(std::move(sm));
     G::apply(s, m); rec.plies++;
@@ -222,6 +240,10 @@ GameRecord<G> play_selfplay_game(const SelfPlayConfig& cfg, Evaluator<G>& ev, Rn
   } else {
     rec.outcome_p0 = G::outcome(s, 0);
   }
+  // Resign-probe calibration: a probe is a FALSE resign when the side that was
+  // about to resign ended up winning the game (outcome_p0 is final here).
+  for (int p : rec.probe_resigners)
+    if ((p == 0 ? rec.outcome_p0 : -rec.outcome_p0) > 0) rec.resign_probe_wins++;
   for (auto& sm : rec.samples) {
     // soft-Z style: blend game outcome with search root-value Q.
     // Both terms are player-to-move view (outcome(s, sm.player); q = root_value
@@ -257,6 +279,10 @@ std::vector<GameRecord<G>> play_selfplay_lanes(const SelfPlayConfig& cfg, Evalua
     if (t.resigned) t.rec.outcome_p0 = (t.resign_loser == 0 ? -1.f : 1.f);
     else if (t.truncated) t.rec.outcome_p0 = cfg.truncate_value;  // non-terminal: adjudicated (audit A2)
     else t.rec.outcome_p0 = G::outcome(t.s, 0);
+    // Resign-probe calibration (see play_selfplay_game): false resign = the
+    // would-be resigner ended up winning.
+    for (int p : t.rec.probe_resigners)
+      if ((p == 0 ? t.rec.outcome_p0 : -t.rec.outcome_p0) > 0) t.rec.resign_probe_wins++;
     for (auto& sm : t.rec.samples) {
       // truncate_value is p0-view, so flip the sign for player-1 samples.
       float z;
@@ -280,7 +306,7 @@ std::vector<GameRecord<G>> play_selfplay_lanes(const SelfPlayConfig& cfg, Evalua
       int nm = G::legal_moves(t.s, mv);
       if (cfg.enable_shortcuts && nm == 1) {
         G::apply(t.s, mv[0]); t.rec.plies++;
-        t.m.set_root(t.s);
+        if (cfg.reuse_tree) t.m.advance_root(mv[0]); else t.m.set_root(t.s);  // keep the subtree
         continue;  // no sample; slot needs another prelude next pass
       }
       Move sc = -1; bool is_win = false;
@@ -292,7 +318,7 @@ std::vector<GameRecord<G>> play_selfplay_lanes(const SelfPlayConfig& cfg, Evalua
         if (sc >= 0 && sc < G::kActionCount) sm.policy[sc] = 1.f;
         t.rec.samples.push_back(std::move(sm));
         G::apply(t.s, sc); t.rec.plies++;
-        t.m.set_root(t.s);
+        if (cfg.reuse_tree) t.m.advance_root(sc); else t.m.set_root(t.s);  // keep the subtree
         continue;
       }
       // Opt-in 2-ply tactics: identical treatment to play_selfplay_game above.
@@ -307,7 +333,7 @@ std::vector<GameRecord<G>> play_selfplay_lanes(const SelfPlayConfig& cfg, Evalua
           t.rec.tactic2_solves++;
           t.rec.samples.push_back(std::move(sm));
           G::apply(t.s, fw); t.rec.plies++;
-          t.m.set_root(t.s);
+          if (cfg.reuse_tree) t.m.advance_root(fw); else t.m.set_root(t.s);  // keep the subtree
           continue;
         }
       }
@@ -315,6 +341,9 @@ std::vector<GameRecord<G>> play_selfplay_lanes(const SelfPlayConfig& cfg, Evalua
       int sims = cfg.simulations;
       if (!t.full) sims = std::max(cfg.cheap_min_sims, (int)(cfg.simulations * cfg.cheap_sim_fraction));
       int have = t.m.root_expanded() ? t.m.total_visits() : 0;
+      // Batch-of-1 root expansion: same reasoning (and same measured ~1.6%-of-evals
+      // note) as play_selfplay_game above -- folding into the batched phase is not
+      // trivially safe, so it stays separate.
       if (!t.m.root_expanded()) t.m.run(1, ev, 1);
       t.sm = Sample<G>(); t.sm.input.resize(input_size<G>()); t.sm.policy.resize(G::kActionCount);
       t.sm.player = G::current_player(t.s);
@@ -355,11 +384,14 @@ std::vector<GameRecord<G>> play_selfplay_lanes(const SelfPlayConfig& cfg, Evalua
       Move m = t.m.sample_move(t.rec.plies < cfg.temperature_moves ? cfg.temperature : 0.f, rng);
       t.sm.q = t.m.root_value();
       if (!t.resigned && cfg.resign_q > -1.5f && t.full && t.rec.plies >= cfg.resign_min_plies
-          && t.m.best_child_q() < cfg.resign_q && rng.uniform() >= cfg.resign_probe) {
-        t.resigned = true; t.resign_loser = t.sm.player;
-        t.rec.samples.push_back(std::move(t.sm));
-        finalize(t); alive--;
-        continue;
+          && t.m.best_child_q() < cfg.resign_q) {
+        if (rng.uniform() >= cfg.resign_probe) {
+          t.resigned = true; t.resign_loser = t.sm.player;
+          t.rec.samples.push_back(std::move(t.sm));
+          finalize(t); alive--;
+          continue;
+        }
+        t.rec.resign_probes++; t.rec.probe_resigners.push_back((int8_t)t.sm.player);
       }
       t.rec.samples.push_back(std::move(t.sm));
       G::apply(t.s, m); t.rec.plies++;
