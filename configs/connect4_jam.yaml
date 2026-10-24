@@ -21,13 +21,17 @@
 #   is < 2 per pair over 15 pairs (6 candidates) -> tournament auto-skips. 7.5 min fits
 #   ~30 games (~2/pair) with ~90 s of trim margin.
 # - eval.roundrobin_games 16 (v9: 20): jam spec; budget-clamped anyway.
+# - selfplay.lanes 96 / batch 48 (v9: 8/16-ish): MEASURED 2026-10-23 lanes-plateau sweep
+#   (docs/HANDOFF.md): lanes 8/batch 16 = 56.6 gps -> lanes 96/batch 48 = ~180 gps (3.2x);
+#   both plateau at 96, batch 48 > 64 within noise. Serving later swaps evaluator;
+#   lanes/batch govern the NN selfplay inference only.
 budget_minutes: 50
 checkpoint: {interval_minutes: 5}
 selfplay: {games_per_iter: 48, simulations: 150, evaluator: rollout, threads: 2,
   temperature_moves: 10, dirichlet: 0, full_prob: 0.25, cheap_frac: 0.15,
   forced: 1, prune: 1, shortcuts: 1, tactics2: 1, augment: true, value_lambda: 0.1,
   hybrid: 1, nn_start_iter: 5, nn_anneal_iters: 40,
-  batch: 8, lanes: 8, nn_strict: 1,
+  batch: 48, lanes: 96, nn_strict: 1,
   resign_q: -0.90, resign_min_plies: 10, resign_probe: 0.15}
 network: {type: resnet, channels: 32, blocks: 3}
 training: {lr: 0.002, weight_decay: 0.0001, batch_size: 256, steps_per_iter: 60,

@@ -40,6 +40,9 @@ template <GameLike G> struct HybridEvaluator : Evaluator<G> {
   NNEvaluator<G> nn_;
   RolloutEvaluator<G> roll_;
   float alpha_;
+
+ public:
+  bool load_now() override { return nn_.load_now(); }
 };
 
 }  // namespace gai

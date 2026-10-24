@@ -102,6 +102,14 @@ struct NNEvaluator : Evaluator<G> {
   }
   long fallbacks() const { return fallbacks_; }
 
+  // Eager load for serving-side hot reload: returns true only when the module
+  // is actually usable. Never throws; on failure module_ stays null and the
+  // next evaluate() re-enters try_load (lazy retry path).
+  bool load_now() override {
+    if (!loaded_) try_load();
+    return module_ != nullptr;
+  }
+
  private:
   void try_load() {
     loaded_ = true;

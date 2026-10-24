@@ -1,0 +1,5 @@
+# Per-game overrides merged over configs/*.yaml by python/gai/orchestrator.py (TODO: implement merge).
+# Scaffolded from templates/board_template by tools/new_game.py; tweak freely.
+game: template
+network: {type: resnet, width: 128, blocks: 8}
+search: {min_simulations: 100, target_simulations: 400, max_simulations: 2000}

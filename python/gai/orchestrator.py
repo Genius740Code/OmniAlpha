@@ -31,10 +31,24 @@ def build_supports_nn(build, game):
     """Probe the C++ build for NN-evaluator support. MUST probe the actual game:
     support is per-registered-game (game headers are compiled in per directory),
     so a connect4-only probe lies about any other game and would poison the
-    whole run's evaluator-switch decision."""
+    whole run's evaluator-switch decision.
+
+    Two-stage probe (distinguishes a libtorch build with nn-strict from a plain
+    build): stage 1 uses a nn-strict: evaluator, which is parsed ONLY by libtorch
+    builds and hard-fails a missing model with exit code 4 (NNEvaluator::die).
+    rc==4 therefore proves NN support. Any other rc falls through to the legacy
+    nn: probe (exit 0 = supported; exit 3 = "evaluator not supported" from
+    make_evaluator in non-libtorch builds). A non-strict nn: probe alone cannot
+    distinguish "supports NN" from "uniform fallback masked the failure".
+    """
     p = run_cmd([f"{build}/selfplay", "--game", game, "--games", "1", "--sims", "2",
-                 "--out", "/tmp/opencode/gai_nn_probe.bin", "--evaluator", "nn:/tmp/nonexistent.ts"])
-    return p.returncode == 0
+                 "--out", "/tmp/opencode/gai_nn_probe_strict.bin", "--evaluator",
+                 "nn-strict:/tmp/nonexistent.ts"])
+    if p.returncode == 4:
+        return True  # libtorch build: strict load failure IS the success signal
+    p2 = run_cmd([f"{build}/selfplay", "--game", game, "--games", "1", "--sims", "2",
+                  "--out", "/tmp/opencode/gai_nn_probe.bin", "--evaluator", "nn:/tmp/nonexistent.ts"])
+    return p2.returncode == 0
 
 def compute_effective_steps(steps_per_iter, fresh_positions, batch_size,
                             max_reuse_ratio, buffered_positions):
@@ -433,6 +447,7 @@ def main():
                "--temp-moves", str(sp.get("temperature_moves", 10)),
                "--loss-fallthrough", str(sp.get("loss_fallthrough", 1)),
                "--gumbel-sigma-mctx", str(sp.get("gumbel_sigma_mctx", 0)),
+               "--tactics2", str(sp.get("tactics2", 0)),
                "--lanes", str(sp.get("lanes", 1))]
         # threads "auto" (or absent) = let the tool default to hardware_concurrency;
         # atol("auto")==0 would spawn zero workers, so only forward numeric values.
@@ -476,7 +491,8 @@ def main():
                "--temp-moves", str(sp.get("temperature_moves", 10)),
                                  "--loss-fallthrough", str(sp.get("loss_fallthrough", 1)),
                                  "--gumbel-sigma-mctx", str(sp.get("gumbel_sigma_mctx", 0)),
-               "--lanes", str(sp.get("lanes", 1))]
+                                 "--tactics2", str(sp.get("tactics2", 0)),
+                                 "--lanes", str(sp.get("lanes", 1))]
                 fb = _maybe_add_threads(fb)
                 stats = sh_json(fb)
             else:
@@ -497,9 +513,21 @@ def main():
          holdout_x, holdout_pi, holdout_z, holdout_full) = split_held_out(
              x, pi, z, full, holdout_frac=cfg["training"].get("holdout_frac", 0.1))
         if sp.get("augment", False):
-            from .data import maybe_mirror_batch
-            train_x, train_pi, train_z, train_full = maybe_mirror_batch(
-                train_x, train_pi, train_z, train_full, game=a.game)
+            from .data import MIRROR_AUGMENTERS, maybe_mirror_batch
+            if a.game in MIRROR_AUGMENTERS:
+                train_x, train_pi, train_z, train_full = maybe_mirror_batch(
+                    train_x, train_pi, train_z, train_full, game=a.game)
+            else:
+                # Auto-disable instead of failing the run: a freshly added game has no
+                # python augmenter (it is per-game registered; arbitrary new game names
+                # can never be pre-registered). Mirror-on-mismatch WOULD corrupt policy
+                # targets, so the guard stays, but the jam does not die at iter 0.
+                sp_aug_note = (f"augment: 1 requested but game '{a.game}' has no "
+                               f"mirror augmenter; selfplay.augment auto-disabled")
+                if not hasattr(main, "_aug_warned"):
+                    print(f"[orchestrator] {sp_aug_note} (symmetry loss is ~free strength; "
+                          f"register one in gai.data.MIRROR_AUGMENTERS if the game has one)")
+                    main._aug_warned = True  # type: ignore[attr-defined]
         if buf is None:
             tr0 = cfg["training"]
             buf = ReplayBuffer(cfg["training"]["replay_capacity"], shape["planes"], shape["h"], shape["w"], shape["actions"],
@@ -602,7 +630,8 @@ def main():
                                 **losses)) + "\n")
         log.flush(); it += 1
         save_checkpoint(net, os.path.join(a.out, "latest.pt"))
-        if el >= next_ck:
+        ck_now = el >= next_ck
+        if ck_now:
             ck = os.path.join(a.out, f"checkpoint_{int(next_ck // 60)}m.pt")
             save_checkpoint(net, ck); next_ck += ck_every
             # EMA twin of the checkpoint (training.ema_decay>0): written at checkpoint
@@ -624,9 +653,7 @@ def main():
                 raise RuntimeError(f"torchscript export failed, aborting: {e}")
             print(f"export ts failed (continuing with stale {latest_ts}): {e}")
         phase(f"iter {it - 1}: checkpoint + exported {os.path.basename(latest_ts)}")
-        if el >= next_ck:
-            ck = os.path.join(a.out, f"checkpoint_{int(next_ck // 60)}m.pt")
-            save_checkpoint(net, ck); next_ck += ck_every
+        if ck_now:
             # Arena that actually measures the net: NN (latest.ts) vs rollout baseline.
             # Old code compared rollout-vs-rollout (identical 16W-4L every run) so Elo never moved.
             try:

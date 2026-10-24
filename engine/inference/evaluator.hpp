@@ -20,6 +20,11 @@ template <GameLike G> struct EvalResult {
 template <GameLike G> struct Evaluator {
   virtual ~Evaluator() = default;
   virtual void evaluate(const typename G::State* states, EvalResult<G>* out, int count) = 0;
+  // Eagerly finish any deferred setup (NN model load). Returns false when the
+  // evaluator cannot operate yet (e.g. model file missing/corrupt). Default: a
+  // non-NN evaluator is always ready. Used by serving-side hot reload to swap
+  // evaluators only AFTER the candidate actually loaded.
+  virtual bool load_now() { return true; }
 };
 
 // Uniform priors, value 0. Baseline / sanity evaluator.
@@ -83,6 +88,10 @@ template <GameLike G> struct CachingEvaluator : Evaluator<G> {
     }
   }
   long hits = 0, misses = 0;
+
+  // Forward the eager-load probe to the wrapped evaluator so cache:<inner> still
+  // supports hot reload (a reload replaces the whole wrapper incl. its cache).
+  bool load_now() override { return inner_ ? inner_->load_now() : false; }
 
  private:
   std::unique_ptr<Evaluator<G>> inner_;

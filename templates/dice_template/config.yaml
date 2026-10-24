@@ -1,0 +1,5 @@
+# Per-game overrides merged over configs/*.yaml by python/gai/orchestrator.py (TODO: implement merge).
+# Scaffolded from templates/dice_template by tools/new_game.py; tweak freely.
+game: template
+network: {type: mlp, hidden: 128, layers: 3}
+search: {min_simulations: 50, target_simulations: 300, max_simulations: 1500}

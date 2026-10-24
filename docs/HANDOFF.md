@@ -107,6 +107,32 @@ Three GLM-5.3 subagents dispatched (equal-time MCTS + Dirichlet auto + 2-ply tac
 
 # JAM PLAN — Strat Jam hard-mode: 1h training → 20min game, TC 2+15
 
+## 2026-10-24: one-command game-adding + jam-day serving hardening (all ctest 7/7 green, pytest 47 passed + 4 torch-uncollectable)
+
+### Fast game-adding (goal: any game from chess to monopoly in ≤1 h)
+- **`tools/new_game.py`** scaffolder: `python3 tools/new_game.py <name> --from take-away|board|dice` — copies a template family into `games/<name>/`, renames the namespace, prints a step-by-step cheat sheet. `board` = 8x8 bitboard connect-K grid w/ 8 D4 symmetries; `dice` = hash-chain dice race w/ capture + bonus slides (chance games WITHOUT engine changes: roll = f(chain), chain advanced by apply — deterministic for MCTS/validator, diverges between games).
+- **`templates/`** added (board_template, dice_template) — NOT compiled in-tree; validated by scaffolding `games/demo_board/` + `games/demo_dice/` (both VALIDATION PASSED; benchmark: board legal 5.7e6/s apply 5.9e6/s; dice 1.5e7/1.3e7 — above jam targets). `games/demo_*` are the working reference examples next to `games/connect4`.
+- **`docs/ADD_ANY_GAME.md`** (new): fast path, API-contract table, validator-failure fixes, "design to train well" rules (small kActionCount, symmetries, bitboards, hash-chain chance pattern §4.2, effort ladder L0-L3), chess-class + monopoly-class recipes, play/train loop, jam cadence. `docs/ADDING_A_GAME.md` now points to it.
+- **`tools/jam.sh`**: one command → scaffold/build/validate/benchmark/arena-smoke/dry-run/train for any game.
+
+### Bot-friendly serving (play vs the training bot during the hour)
+- `play --model X.ts` (libtorch build), **`--reload`** = hot-swap model per move on mtime change; **only swaps after the candidate actually loads** (`Evaluator::load_now()` added to Evaluator/CachingEvaluator/Hybrid/NNEvaluator; failure keeps previous evaluator and retries next move — a corrupt/racing export cannot turn the bot uniform). Spec parser covers `nn:`, `nn-strict:`, `hybrid:<path>:<alpha>`, `cache[:cap]:<inner>`.
+- `play --cache [CAP]` wraps NN in hash eval cache; NN serving leaf batch defaults to **32** (`--batch` overrides); `play --solve-probe 1 [--solve-probe-ms 250]` runs the budgeted exact solver at the root before MCTS and plays a PROVEN win instantly (verified connect4 + template game path, exact/non-negative contract respected: never acts on unproven values).
+- `play` now prints the legal move ids line for human turns.
+
+### P0 fixes found by scout+verifier subagents (both VERIFIED, fixed)
+- **train.py `make_trainer` was broken** (identity re-indent: `return dict(...)` had escaped `step`; every trainer construction raised NameError 'loss'). Restored; AST-verified.
+- **TorchScript export was non-atomic AND hot-reload swapped optimistically**: export_torchscript/save_checkpoint now write `*.tmp.<pid>` then `os.replace()`; play reload gate described above. This was the "silent uniform bot for up to 5 min per race" failure mode.
+- orchestrator.py: `--tactics2` now forwarded in BOTH cmd and fb (was unreachable); duplicate `if el >= next_ck:` double-save merged into one `ck_now` block; `build_supports_nn` two-stage probe (nn-strict exit-4 = proof of libtorch support) instead of the uniform-fallback-masked rc-0 probe.
+- **configs/connect4_jam.yaml** now carries the measured winners: lanes 96 / batch 48 (180 gps, 3.2x), checkpoint 5 min, resign -0.90/0.15 probe, tactics2 1, eval tc_ms 300.
+- Not done (deliberate): pondering (needs suite A/B, CPU-contended box), lr_schedule cosine in jam (no measured evidence).
+
+### Remaining pre-jam validation (this sandbox has NO torch/CUDA/build-lt)
+- `cmake -S . -B build-lt -DGAI_LIBTORCH=ON ...` must be built on the real machine: the libtorch-gated `load_now()` additions compile-checked by review only.
+- One `--reload` rehearsal must print `[model reloaded]` ≥2x while training runs; check `false_resign_rate < 5%` in the 15-min pilot; `--dry-run` the timeline.
+
+
+
 Format: train ~50-55 min, then a live 20-min game at 2+15 (≈20-42 plies → ~10 min total think
 time available → serving sims can be WORLD-CLASS: 600-1200 sims/move is affordable).
 

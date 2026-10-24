@@ -1,5 +1,5 @@
 """Training step + checkpointing + TorchScript export."""
-import math, time, torch, torch.nn.functional as F
+import math, os, time, torch, torch.nn.functional as F
 from .model import build
 
 def setup_torch_threads(n):
@@ -92,7 +92,7 @@ def make_trainer(net_cfg, shape, lr=1e-3, wd=1e-4, amp=True, device=None,
         scaler.step(opt); scaler.update()
         ema_update()
         # return tensors; orchestrator extracts .item() at iter boundaries to avoid per-step overhead
-    return dict(loss=loss.item(), policy_loss=lp.item(), value_loss=lv.item())
+        return dict(loss=loss.item(), policy_loss=lp.item(), value_loss=lv.item())
     return net, opt, step, set_lr, ema
 
 def ema_export(ema, net, shape, path_pt, path_ts):
@@ -108,13 +108,24 @@ def ema_export(ema, net, shape, path_pt, path_ts):
     export_torchscript(enet, shape, path_ts)
 
 def save_checkpoint(net, path, extra=None):
-    torch.save({"state": net.state_dict(), **(extra or {})}, path)
+    # Atomic rename: a reader loading the checkpoint mid-write (endgame tournament,
+    # post-hoc scripts) must never see a truncated file.
+    tmp = f"{path}.tmp.{os.getpid()}"
+    torch.save({"state": net.state_dict(), **(extra or {})}, tmp)
+    os.replace(tmp, path)
 
 def load_checkpoint(net, path, device="cpu"):
     sd = torch.load(path, map_location=device)
     net.load_state_dict(sd["state"] if "state" in sd else sd)
 
 def export_torchscript(net, shape, path):
-    """For the C++ NNEvaluator (libtorch). Input [B,planes,h,w] -> (policy_logits[B,A], value[B])."""
+    """For the C++ NNEvaluator (libtorch). Input [B,planes,h,w] -> (policy_logits[B,A], value[B]).
+
+    Atomic: writes to a private temp file in the same directory, then os.replace(),
+    so a serving-side hot reload (play --reload / NNEvaluator lazy load) can never
+    read a half-written .ts while training exports.
+    """
     net.eval(); ex = torch.zeros(1, shape["planes"], shape["h"], shape["w"], device=next(net.parameters()).device)
-    torch.jit.trace(net, ex).save(path)
+    tmp = f"{path}.tmp.{os.getpid()}"
+    torch.jit.trace(net, ex).save(tmp)
+    os.replace(tmp, path)

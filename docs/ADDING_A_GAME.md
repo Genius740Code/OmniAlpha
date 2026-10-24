@@ -1,5 +1,8 @@
 # Adding a game (for a coding agent)
+> Superseded: see **docs/ADD_ANY_GAME.md** for the current fast path (scaffolder tool,
+> 3 templates, family recipes, training-oriented design). The steps below remain valid.
 1. `cp -r games/template games/<name>`; rename namespace `game_template` -> `game_<name>` in `game.hpp` and `reference_game.hpp`.
+   (Faster: `python3 tools/new_game.py <name>` does this for you.)
 2. Write `GAME_RULES.md` (rules, move numbering, outcomes, symmetries).
 3. Edit `game.hpp`: `State`, constants, `legal_moves`, `apply`, `is_terminal`, `outcome`, `current_player`, `hash`, `encode`, optional `undo` and symmetries.
    Contract and conventions are documented at the top of `engine/core/api.hpp`. Do NOT touch `engine/`.

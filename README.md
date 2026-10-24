@@ -3,6 +3,12 @@
 General game-AI framework (C++20 + PyTorch, AlphaZero-style) where **adding a game = editing `games/<name>/` only**.
 Goal: **strongest bot per wall-clock minute** — 60-min competition mode or long-term training.
 
+Add a new game in one command — three ready templates (pure-logic board-grid 8x8-bitboard, chance/race):
+```bash
+python3 tools/new_game.py <name> --from board   # take-away (logic) | board (grid) | dice (chance)
+```
+See `docs/ADD_ANY_GAME.md` (fast path + recipes for chess-class & monopoly-class games).
+
 ```
 games/<name>/ (rules) -> validate_game -> benchmark_game -> selfplay (MCTS) -> train (python) -> evaluate -> play
 ```
@@ -21,8 +27,9 @@ games/<name>/ (rules) -> validate_game -> benchmark_game -> selfplay (MCTS) -> t
 ## Layout
 
 `engine/` (core API, mcts, selfplay, inference, evaluation, time_manager) · `games/` (template,
-connect4) · `tools/` (validate/selfplay/evaluate/play/benchmark) · `python/gai/` (model, data,
-train, orchestrator) · `configs/` (competition_60m, long_term, connect4_10min_*) · `tests/` · `docs/`.
+connect4, demo_board, demo_dice) · `templates/` (board_template, dice_template — used by
+`tools/new_game.py`, not compiled directly) · `tools/` (validate/selfplay/evaluate/play/benchmark/new_game.py)
+· `python/gai/` (model, data, train, orchestrator) · `configs/` (competition_60m, long_term, connect4_10min_*) · `tests/` · `docs/`.
 
 ## Quick start
 
