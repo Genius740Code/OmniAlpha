@@ -128,5 +128,20 @@ int main() {
     }
     EXPECT(p0 == 0); EXPECT(short_games == 18);
   }
+  { // Empty-tree move accessors must return -1, not read nodes_[-1].
+    // This is reachable in practice: adaptive_search with a zero max-sims budget
+    // (time-sliced callers) and any play/arena loop that asks for a move before
+    // the root has been expanded.
+    using G = game_connect4::Game; UniformEvaluator<G> ev;
+    MCTS<G> t; t.set_root(G::initial());
+    Rng rng(3);
+    EXPECT(!t.root_expanded());
+    EXPECT(t.best_move() == -1);
+    EXPECT(t.sample_move(0.f, rng) == -1);
+    EXPECT(t.sample_move(1.f, rng) == -1);
+    SearchLimits L; L.min_simulations = 0; L.target_simulations = 0; L.max_simulations = 0;
+    auto r = adaptive_search<G>(t, ev, L);
+    EXPECT(r.best == -1); EXPECT(r.sims == 0);  // no search, no bogus move
+  }
   std::printf("mcts OK\n"); return 0;
 }

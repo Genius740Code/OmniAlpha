@@ -232,7 +232,12 @@ template <GameLike G> class MCTS {
     return b;
   }
   Move best_move() const {
-    int bi = 0; for (int i = 1; i < num_root_children(); i++) if (child_visits(i) > child_visits(bi)) bi = i;
+    // An unexpanded root has no children: returning -1 lets callers (play/evaluate/
+    // adaptive_search on a zero-sim budget) detect "no move yet" instead of reading
+    // nodes_[-1] through child_move(0).
+    int nc = num_root_children();
+    if (nc <= 0) return -1;
+    int bi = 0; for (int i = 1; i < nc; i++) if (child_visits(i) > child_visits(bi)) bi = i;
     return child_move(bi);
   }
   // A6 LCB move selection: pick by lower confidence bound on value instead of
@@ -273,12 +278,15 @@ template <GameLike G> class MCTS {
     return h;
   }
   Move sample_move(float temperature, Rng& rng) const {
+    int nc = num_root_children();
+    if (nc <= 0) return -1;  // unexpanded root: same guard as best_move()
     if (temperature <= 1e-3f) return best_move();
-    std::vector<double> w(num_root_children()); double sum = 0;
-    for (int i = 0; i < num_root_children(); i++) { w[i] = std::pow((double)child_visits(i), 1.0 / temperature); sum += w[i]; }
+    std::vector<double> w(nc); double sum = 0;
+    for (int i = 0; i < nc; i++) { w[i] = std::pow((double)child_visits(i), 1.0 / temperature); sum += w[i]; }
+    if (!(sum > 0)) return best_move();  // every visit count zero -> argmax fallback
     double r = rng.uniform() * sum;
-    for (int i = 0; i < num_root_children(); i++) { r -= w[i]; if (r <= 0) return child_move(i); }
-    return child_move(num_root_children() - 1);
+    for (int i = 0; i < nc; i++) { r -= w[i]; if (r <= 0) return child_move(i); }
+    return child_move(nc - 1);
   }
 
  private:
