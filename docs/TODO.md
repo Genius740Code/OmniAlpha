@@ -69,7 +69,8 @@ Rule: one change at a time behind flags; A/B at equal wall-clock; kill on SPRT f
      weighting, root-temp × c_puct sweep (frozen net).
 
 7. [ ] **Competition plumbing** — profiler→auto-config, ladder with
-     alpha-beta/minimax + old checkpoints, opening book, 5-min dry run, dashboard.
+     alpha-beta/minimax ✅ (`evaluate --evaluator-a ab:depth=D[:ms=M]`) + old checkpoints,
+     opening book, 5-min dry run, dashboard.
 
 8. [ ] **Engineering tests** — encode parity, TorchScript parity, MCTS-vs-minimax
      on template game, golden-seed regression, sample fuzz, throughput budget in CI.

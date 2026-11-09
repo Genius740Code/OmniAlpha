@@ -98,7 +98,10 @@ Three GLM-5.3 subagents dispatched (equal-time MCTS + Dirichlet auto + 2-ply tac
 ### TODO to finish (resume subagent C or take over hand-crafted):
 1. **Verify solver.hpp exactness**: `--solve-initial` must report P0 win (center), print nodes/seconds; deadline: <60 s (optimize ordering / bitboard TT if >120 s).
 2. **Oracle labels**: `--positions 200 --out /tmp/opencode/labels_test.bin` must run <3 min and write the binary layout {hash, value_from_p0, best_move}; then wire the labels into checkpoint eval as an optimal-move-rate gate (next agent's choice).
-3. **Wire ab_agent into arena**: `evaluate.cpp` does NOT have an `ab:` agent type yet; add `--evaluator-a ab:depth=D:ms=M` (select_move per move at equal `--tc-ms`), consistent JSON key on names for winner attribution.
+3. ✅ **ab_agent is wired into the arena**: `evaluate --evaluator-a ab:depth=D[:ms=M]`
+   (also `ab:D`, `d=`, `time=` aliases; `ms=0` uses `--tc-X` if set). A/B either vs
+   MCTS/NN or ab-vs-ab; JSON now carries `agent_a`/`agent_b` labels for attribution.
+   Parser unit-tested in `tests/test_mcts.cpp`.
 4. **Race agent types**: new config `race.enabled 1` candidates now: `[rollout]`, `[nn]`, `[ab:...]` at equal tc; orchestrator must allow agent-type candidates, not just architectures.
 5. **Configs**: refresh `configs/connect4_60m_v9.yaml` with `dirichlet: 0` (auto), `eval.tc_ms: 30`, `eval.ordered: true`, `tactics2` A/B flag, race enabled. Also update `docs/REUSE.md` probe note about `--dirichlet 0` semantic change.
 6. **Docs**: update README + docs/TODO.md status tables to reflect shipped items above (equal-time, SPRT 35, vectorised replay, dry-run, solver files present).

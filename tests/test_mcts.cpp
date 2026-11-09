@@ -2,6 +2,7 @@
 #include <cstdlib>
 #include "games/connect4/game.hpp"
 #include "games/template/game.hpp"
+#include "engine/evaluation/ab_agent.hpp"
 #include "engine/mcts/adaptive.hpp"
 #include "engine/selfplay/selfplay.hpp"
 using namespace gai;
@@ -169,6 +170,21 @@ int main() {
       int q = first_pile(r.samples[0]);
       EXPECT(q <= 21 - 3 && q > 0);      // lanes path applies the same rule
     }
+  }
+  { // arena ab: agent spec parser (`ab:depth=D[:ms=M]`) used by tools/evaluate.
+    AbAgentSpec s;
+    EXPECT(parse_ab_agent_spec("ab:depth=6:ms=50", s));
+    EXPECT(s.active && s.depth == 6 && s.ms == 50);
+    AbAgentSpec d; EXPECT(parse_ab_agent_spec("ab:", d));
+    EXPECT(d.depth == 4 && d.ms == 0);              // defaults
+    AbAgentSpec b; EXPECT(parse_ab_agent_spec("ab:7", b));
+    EXPECT(b.depth == 7);                           // bare token = depth
+    AbAgentSpec t; EXPECT(parse_ab_agent_spec("ab:d=3:time=9", t));
+    EXPECT(t.depth == 3 && t.ms == 9);              // aliases
+    AbAgentSpec bad;
+    EXPECT(!parse_ab_agent_spec("ab:foo=1", bad));  // unknown key
+    EXPECT(!parse_ab_agent_spec("ab:depth=-1", bad));  // negative depth
+    EXPECT(!parse_ab_agent_spec("rollout", bad));   // not an ab spec
   }
   { // Empty-tree move accessors must return -1, not read nodes_[-1].
     // This is reachable in practice: adaptive_search with a zero max-sims budget

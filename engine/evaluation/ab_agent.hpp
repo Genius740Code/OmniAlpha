@@ -16,9 +16,47 @@
 // solving); depth >= 2 already blocks single immediate threats (they are proven losses).
 #pragma once
 #include <cstdlib>
+#include <string>
 #include "engine/evaluation/solver.hpp"
 
 namespace gai {
+
+// `ab:depth=D[:ms=M]` arena agent spec (classical alpha-beta baseline, no MCTS/NN).
+// Accepts `d=` as an alias for `depth=`, a bare number as depth (`ab:6`), and treats
+// an absent depth as 4. `ms=0` (default) means "use --tc-X if set, else no clock".
+struct AbAgentSpec {
+  bool active = false;
+  int depth = 4;
+  long ms = 0;
+};
+
+inline bool parse_ab_agent_spec(const std::string& spec, AbAgentSpec& out) {
+  if (spec.rfind("ab:", 0) != 0) return false;
+  out.active = true;
+  out.depth = 4;
+  out.ms = 0;
+  size_t pos = 3;
+  while (pos <= spec.size()) {
+    size_t end = spec.find(':', pos);
+    if (end == std::string::npos) end = spec.size();
+    const std::string tok = spec.substr(pos, end - pos);
+    if (!tok.empty()) {
+      const size_t eq = tok.find('=');
+      if (eq == std::string::npos) {
+        out.depth = std::atoi(tok.c_str());  // bare token = depth
+      } else {
+        const std::string key = tok.substr(0, eq);
+        const int val = std::atoi(tok.c_str() + eq + 1);
+        if (key == "depth" || key == "d") out.depth = val;
+        else if (key == "ms" || key == "time") out.ms = val;
+        else return false;
+      }
+    }
+    if (end == spec.size()) break;
+    pos = end + 1;
+  }
+  return out.depth >= 0 && out.ms >= 0;
+}
 
 template <class G> struct AbAgent {
   using State = typename G::State;

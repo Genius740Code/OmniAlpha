@@ -6,6 +6,7 @@
 //   [--dirichlet-a A] [--dirichlet-b B] (optional root noise, selfplay --dirichlet semantics:
 //       value <= 0 = auto alpha 10/#root_children; absent = noise off, legacy behavior)
 //   evaluators: uniform|rollout[:N]|nn:<path>|ensemble:<a>+<b>+...|cache[:CAP]:<inner>
+//               |ab:depth=D[:ms=M]  (classical alpha-beta reference agent)
 // Arena: player A vs B (colors alternate, paired openings). Reports W/L/D, Elo of A over B and 95% CI as JSON,
 // plus the configured tc values and measured per-move search time (mean + p95) per agent.
 #include <algorithm>
@@ -13,6 +14,7 @@
 #include <chrono>
 #include <thread>
 #include <vector>
+#include "engine/evaluation/ab_agent.hpp"
 #include "engine/evaluation/elo.hpp"
 #include "tools/common.hpp"
 using namespace gai;
@@ -31,6 +33,16 @@ template <class T> int run(const Args& a) {
     std::string model_path = a.str("model");
     evaluator_a_str = "nn:" + model_path;
     evaluator_b_str = "nn:" + model_path;
+  }
+  AbAgentSpec ab_spec[2];
+  const bool is_ab[2] = {parse_ab_agent_spec(evaluator_a_str, ab_spec[0]),
+                         parse_ab_agent_spec(evaluator_b_str, ab_spec[1])};
+  for (int i = 0; i < 2; i++) {
+    const std::string& s = i == 0 ? evaluator_a_str : evaluator_b_str;
+    if (!is_ab[i] && s.rfind("ab:", 0) == 0) {
+      std::fprintf(stderr, "bad ab spec '%s' (want ab:depth=D[:ms=M])\n", s.c_str());
+      return 2;
+    }
   }
 
   int games = (int)a.num("games", 100);
@@ -68,9 +80,10 @@ template <class T> int run(const Args& a) {
       if (spec.rfind("cache", 0) == 0 || spec == "uniform") return make_evaluator<G>(spec, sd);
       return std::unique_ptr<Evaluator<G>>(new CachingEvaluator<G>(make_evaluator<G>(spec, sd), 1u << 18));
     };
-    auto e0 = mk(evaluator_a_str, 11 + (uint64_t)tid * 100003);
-    auto e1 = mk(evaluator_b_str, 22 + (uint64_t)tid * 100003);
+    auto e0 = is_ab[0] ? nullptr : mk(evaluator_a_str, 11 + (uint64_t)tid * 100003);
+    auto e1 = is_ab[1] ? nullptr : mk(evaluator_b_str, 22 + (uint64_t)tid * 100003);
     std::unique_ptr<Evaluator<G>> ev[2] = {std::move(e0), std::move(e1)};
+    AbAgent<G> ab_agent[2];  // stateless across moves except LastInfo; solver TT is thread_local
     Rng lrng((uint64_t)a.num("seed", 5) * 1000003 + (uint64_t)tid);
     while (true) {
       int g = next.fetch_add(1); if (g >= games) break;
@@ -85,31 +98,40 @@ template <class T> int run(const Args& a) {
       tree[0].set_root(s); tree[1].set_root(s);
       while (!G::is_terminal(s)) {
         int who = (G::current_player(s) == a_is) ? 0 : 1;  // 0 = A, 1 = B
-        SearchLimits L;
-        if (tc[who] > 0) {
-          // Equal-time mode: wall clock stops the search (MCTS deadline inside run()
-          // + hard_ms here). --sims-X stays a hard cap; min is lowered to 1 so
-          // proven-win/loss early-stops can fire before either limit.
-          L.min_simulations = 1;
-          L.target_simulations = L.max_simulations = std::max(1, sims[who]);
-          L.soft_ms = L.hard_ms = (double)tc[who];
-          tree[who].set_deadline(std::chrono::steady_clock::now() + std::chrono::milliseconds(tc[who]));
-        } else {
-          tree[who].clear_deadline();
-          // Headroom above target so proven-win/loss + can't-be-overtaken early-stops can fire.
-          L.min_simulations = L.target_simulations = sims[who];
-          L.max_simulations = std::max(sims[who], (int)a.num("max-sims", 6 * sims[who]));
-        }
-        L.batch = 1;
-        if (noise[who]) {
-          if (!tree[who].root_expanded()) tree[who].run(1, *ev[who], 1);
-          tree[who].add_root_noise(lrng);
-        }
+        Move m = -1;
         auto mt0 = std::chrono::steady_clock::now();
-        auto rep = adaptive_search<G>(tree[who], *ev[who], L); (void)rep;
+        if (is_ab[who]) {
+          // Classical reference agent: no tree/NN. Explicit ms= wins; otherwise a
+          // --tc-X time control doubles as the search budget.
+          const long ms = ab_spec[who].ms > 0 ? ab_spec[who].ms : (long)tc[who];
+          m = ab_agent[who].select_move(s, ab_spec[who].depth, ms);
+        } else {
+          SearchLimits L;
+          if (tc[who] > 0) {
+            // Equal-time mode: wall clock stops the search (MCTS deadline inside run()
+            // + hard_ms here). --sims-X stays a hard cap; min is lowered to 1 so
+            // proven-win/loss early-stops can fire before either limit.
+            L.min_simulations = 1;
+            L.target_simulations = L.max_simulations = std::max(1, sims[who]);
+            L.soft_ms = L.hard_ms = (double)tc[who];
+            tree[who].set_deadline(std::chrono::steady_clock::now() + std::chrono::milliseconds(tc[who]));
+          } else {
+            tree[who].clear_deadline();
+            // Headroom above target so proven-win/loss + can't-be-overtaken early-stops can fire.
+            L.min_simulations = L.target_simulations = sims[who];
+            L.max_simulations = std::max(sims[who], (int)a.num("max-sims", 6 * sims[who]));
+          }
+          L.batch = 1;
+          if (noise[who]) {
+            if (!tree[who].root_expanded()) tree[who].run(1, *ev[who], 1);
+            tree[who].add_root_noise(lrng);
+          }
+          auto rep = adaptive_search<G>(tree[who], *ev[who], L); (void)rep;
+          m = lcb[who] > 0 ? tree[who].best_move_lcb(lcb[who]) : tree[who].sample_move(0.f, lrng);
+        }
         auto& tms = who == 0 ? ms_a[tid] : ms_b[tid];
         tms.push_back(std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - mt0).count());
-        Move m = lcb[who] > 0 ? tree[who].best_move_lcb(lcb[who]) : tree[who].sample_move(0.f, lrng);
+        if (m < 0) break;  // non-terminal state with no legal move (game contract violation)
         G::apply(s, m); tree[0].advance_root(m); tree[1].advance_root(m);
       }
       float o = G::outcome(s, a_is); if (o > 0) w++; else if (o < 0) l++; else d++;
@@ -134,10 +156,10 @@ template <class T> int run(const Args& a) {
   double a_mean = 0, a_p95 = 0, b_mean = 0, b_p95 = 0;
   mstats(ms_a, a_mean, a_p95); mstats(ms_b, b_mean, b_p95);
   auto e = estimate_elo(W, Lc, D);
-  std::printf("{\"game\":\"%s\",\"games\":%d,\"sims_a\":%d,\"sims_b\":%d,\"tc_ms_a\":%d,\"tc_ms_b\":%d,"
+  std::printf("{\"game\":\"%s\",\"agent_a\":\"%s\",\"agent_b\":\"%s\",\"games\":%d,\"sims_a\":%d,\"sims_b\":%d,\"tc_ms_a\":%d,\"tc_ms_b\":%d,"
               "\"ms_move_a_mean\":%.3f,\"ms_move_a_p95\":%.3f,\"ms_move_b_mean\":%.3f,\"ms_move_b_p95\":%.3f,"
               "\"wins\":%d,\"losses\":%d,\"draws\":%d,\"score\":%.3f,\"elo_a_over_b\":%.1f,\"elo_ci95\":%.1f}\n",
-              a.str("game").c_str(), games, sims[0], sims[1], tc[0], tc[1],
+              a.str("game").c_str(), evaluator_a_str.c_str(), evaluator_b_str.c_str(), games, sims[0], sims[1], tc[0], tc[1],
               a_mean, a_p95, b_mean, b_p95,
               W, Lc, D, e.score, e.elo, e.ci95);
   return 0;

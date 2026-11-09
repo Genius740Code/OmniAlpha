@@ -20,6 +20,8 @@ games/<name>/ (rules) -> validate_game -> benchmark_game -> selfplay (MCTS) -> t
   early stop, eval cache, adaptive search, TimeManager, Elo arena. 4/4 ctest + ASan/UBSan pass.
 - Data diversity: opt-in random opening plies (`selfplay --opening-plies N`, default 0) break the
   identical-root correlation; book moves are played, not trained on (no samples).
+- Reference opponents for honest Elo: `evaluate --evaluator-a ab:depth=D[:ms=M]` runs the
+  classical alpha-beta agent (no MCTS/NN) in the arena; JSON reports agent labels.
 - Training loop closes end-to-end (selfplay → replay → train → TorchScript → NN-guided selfplay
   → arena promotion). Connect4 10-min pilots: loss 1.95 → 1.57, checkpoints improve monotonically,
   but absolute strength vs rollout baselines is unresolved (20-game CIs). Gumbel-prior-noise

@@ -182,7 +182,7 @@ AlphaZero-style MCTS is not always the best use of 60 minutes. For some games a 
 
 - **Alpha-beta + iterative deepening + transposition table + move ordering (killers/history) + bitboards [CLASSIC]** is a very strong baseline for small/tactical games with cheap, decent evaluation. A well-written one can beat a net trained for an hour.
 - **Practical uses inside `gai` [MINE]:**
-  1. **Baseline opponent / referee** for Elo: always know "are we beating a solid alpha-beta?" instead of only "beating our old self".
+  1. **Baseline opponent / referee** for Elo: always know "are we beating a solid alpha-beta?" instead of only "beating our old self". ✅ wired: `evaluate --evaluator-a ab:depth=D[:ms=M]`.
   2. **Endgame solver:** when ≤ K plies/pieces remain, solve exactly (alpha-beta or retrograde analysis) → *exact* value + best move. Use it as a search shortcut (Tier A) and as **noise-free training targets**.
   3. **Proof-number search / PN-MCTS** for forced-win-heavy games: Winands' group reports PN-MCTS outperforming MCTS in most tested domains (tactical games, not Gomoku) **[SRC]**.
 - **Decision rule:** if the game's evaluation is easy to hand-write *and* tactics dominate → build the alpha-beta baseline first and measure; if evaluation is hard/positional → NN+MCTS. Run both in the arena.
