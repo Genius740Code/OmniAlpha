@@ -3,9 +3,16 @@
 Goal: max Elo per wall-clock minute (60-min competition + long-term).
 Rule: one change at a time behind flags; A/B at equal wall-clock; kill on SPRT failure.
 
-## Done and kept (4/4 ctest + ASan green)
+## Done and kept (ctest + ASan green)
 
 - PUCT + Dirichlet + temperature exploration (`engine/mcts/mcts.hpp`)
+- MCTS empty-tree guards: `best_move`/`sample_move` return -1 instead of reading
+  `nodes_[-1]` when the root was never expanded (zero-budget adaptive callers)
+- Selfplay opening diversity: opt-in `--opening-plies N` / `SelfPlayConfig::opening_plies`
+  (default 0); book moves emit no samples
+- Arena alpha-beta reference agent: `evaluate --evaluator-a ab:depth=D[:ms=M]`
+- Test suite: masked-policy-loss test pinned to CPU so CUDA hosts stop reporting
+  a device-dependent false failure
 - MCTS-Solver proof propagation; forced playouts + policy-target pruning
 - Playout-cap randomization + `full_search` flag + masked policy loss
 - Single-move skip + win/block-in-1 shortcuts (value-only)
