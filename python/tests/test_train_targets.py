@@ -29,7 +29,10 @@ def _batch(n=4, seed=0):
 
 
 def test_policy_loss_is_masked_to_full_search_rows():
-    net, opt, step, set_lr, ema = make_trainer(CFG, SHAPE, value_weight=0.0, ema_decay=0.0)
+    # Pin to CPU: this test builds its own reference tensors on the default device.
+    # Without device="cpu" it fails on CUDA boxes with "mat1 is on cpu".
+    net, opt, step, set_lr, ema = make_trainer(CFG, SHAPE, value_weight=0.0,
+                                               ema_decay=0.0, device="cpu")
     x, pi, z = _batch(4)
     full = np.array([1.0, 0.0, 1.0, 0.0], np.float32)
     net.eval()
