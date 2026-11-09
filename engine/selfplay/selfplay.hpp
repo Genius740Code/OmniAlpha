@@ -38,6 +38,13 @@ struct SelfPlayConfig {
   int lanes = 1;                  // lockstep games per worker (>1 batches one leaf
                                   // per game into a single evaluator call; no virtual
                                   // loss, unchanged per-tree semantics; non-Gumbel only)
+  int opening_plies = 0;          // uniform-random legal opening plies, no samples.
+                                  // Breaks the "every game starts from the same root"
+                                  // correlation: more independent positions per hour and
+                                  // a value/policy signal that is not dominated by one
+                                  // opening line. 0 = legacy behaviour (search from the
+                                  // initial position). Book moves are NOT policy targets:
+                                  // they were never searched, so they get no sample.
   MctsConfig mcts;
 };
 
@@ -51,6 +58,23 @@ template <GameLike G> struct GameRecord { std::vector<Sample<G>> samples; float 
   int resign_probe_wins = 0;  // probes whose would-be resigner ended up WINNING (false resigns)
   std::vector<int8_t> probe_resigners;  // would-be resigner per probe; scored at game end
 };
+
+// Play up to `plies` uniform-random legal opening moves (training-data diversity, the
+// cheap half of Go-Exploit-style start-state variety; see docs/FAST_TRAINING_IDEAS.md).
+// Returns how many moves were actually played (stops on terminal states / no moves).
+// Book moves deliberately emit no sample: the position was never searched, so any
+// policy target there would be noise (single-move shortcuts use the same rule).
+template <GameLike G>
+int play_random_opening(typename G::State& s, int plies, Rng& rng) {
+  Move mv[G::kMaxMoves];
+  int played = 0;
+  for (; played < plies && !G::is_terminal(s); played++) {
+    int n = G::legal_moves(s, mv);
+    if (n <= 0) break;
+    G::apply(s, mv[rng.below((uint32_t)n)]);
+  }
+  return played;
+}
 
 // Generic win-in-1: move that ends the game with a win for the mover.
 template <GameLike G> bool find_win_in_1(const typename G::State& s, Move* out) {
@@ -123,7 +147,9 @@ template <GameLike G> bool find_forced_win_2ply(const typename G::State& s, Move
 
 template <GameLike G>
 GameRecord<G> play_selfplay_game(const SelfPlayConfig& cfg, Evaluator<G>& ev, Rng& rng) {
-  GameRecord<G> rec; MCTS<G> mcts(cfg.mcts); auto s = G::initial(); mcts.set_root(s);
+  GameRecord<G> rec; MCTS<G> mcts(cfg.mcts); auto s = G::initial();
+  if (cfg.opening_plies > 0) play_random_opening<G>(s, cfg.opening_plies, rng);
+  mcts.set_root(s);
   bool resigned = false; int resign_loser = -1;
   while (!G::is_terminal(s) && rec.plies < G::kMaxGameLength) {
     Move mv[G::kMaxMoves];
@@ -274,7 +300,11 @@ std::vector<GameRecord<G>> play_selfplay_lanes(const SelfPlayConfig& cfg, Evalua
     bool has_sm = false, full = false; int sims_left = 0; Sample<G> sm;
   };
   std::vector<Slot> sl(L);
-  for (auto& t : sl) { t.m = MCTS<G>(cfg.mcts); t.s = G::initial(); t.m.set_root(t.s); }
+  for (auto& t : sl) {
+    t.m = MCTS<G>(cfg.mcts); t.s = G::initial();
+    if (cfg.opening_plies > 0) play_random_opening<G>(t.s, cfg.opening_plies, rng);
+    t.m.set_root(t.s);
+  }
   auto finalize = [&](Slot& t) {
     if (t.resigned) t.rec.outcome_p0 = (t.resign_loser == 0 ? -1.f : 1.f);
     else if (t.truncated) t.rec.outcome_p0 = cfg.truncate_value;  // non-terminal: adjudicated (audit A2)

@@ -55,7 +55,9 @@ Rule: one change at a time behind flags; A/B at equal wall-clock; kill on SPRT f
      net+rollout blend on `build-lt`. Value-mixing already shifts the numbers
      significantly (+52 at 320s).
 
-4. [~] **Data diversity** — endgame-first curriculum, archive starts, resign +
+4. [~] **Data diversity** — endgame-first curriculum, archive starts,
+     random opening plies ✅ (`selfplay --opening-plies N` / `SelfPlayConfig::opening_plies`,
+     default 0 = legacy; book moves emit no samples), resign +
      calibration ✅ (`--resign-q -0.92` on `best_child_q` + `resign_probe`),
      recency-weighted replay ✅ (`training.recency_weight`, `ReplayBuffer.sample`),
      longer tempering, dedup/downweight duplicates.

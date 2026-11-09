@@ -172,7 +172,7 @@ beating standard MuZero when simulations are limited **[SRC-2nd]**.
 | Overlap self-play and training (async) | CLASSIC | Keep GPU busy: train while workers generate; sync weights every N minutes |
 | LR warmup + cosine/step schedule, AdamW/SGD, large batch | CLASSIC | Tune per game in config racing |
 | Stochastic weight averaging | SRC (KataGo) | Cheap stability gain |
-| Opening diversity (random opening plies, archive starts) | SRC (Go-Exploit) / CLASSIC | Avoid training on near-identical games |
+| Opening diversity (random opening plies, archive starts) | SRC (Go-Exploit) / CLASSIC | Avoid training on near-identical games. ✅ random opening plies shipped (`selfplay --opening-plies N`, `SelfPlayConfig::opening_plies`, default 0); book moves emit no samples because they were never searched. Archive starts still TODO |
 | Resignation / early game termination with calibration | SRC-2nd | Saves self-play time on lopsided games |
 | Curriculum: start from endgames/small positions | CLASSIC/MINE | Endgame positions have precise values, a solver can label them exactly (§5) |
 

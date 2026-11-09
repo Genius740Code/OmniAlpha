@@ -1,8 +1,11 @@
 // ./build/selfplay --game NAME --games N --sims S --out data.bin [--threads T] [--seed X]
 //   [--evaluator uniform|rollout[:N]|ensemble:<a>+<b>+...|cache[:CAP]:<inner>]
-//   [--batch B] [--dirichlet 0.3] [--temp-moves 10] [--tactics2 1]  Prints one JSON summary line.
+//   [--batch B] [--dirichlet 0.3] [--temp-moves 10] [--tactics2 1]
+//   [--opening-plies N]  Prints one JSON summary line.
 // --dirichlet <= 0 enables auto mode: root noise alpha = 10/#root_children per root.
 // --tactics2 1 enables the 2-ply forced-win (win-in-3) root shortcut (default off).
+// --opening-plies N starts each game after N random legal moves, with no samples for
+//   those book moves (training-data diversity; default 0 = legacy start).
 // Each thread runs independent games with its own tree (batching across games on a shared GPU queue is a TODO).
 #include <atomic>
 #include <chrono>
@@ -37,6 +40,7 @@ template <class T> int run(const Args& a) {
   cfg.resign_min_plies = (int)a.num("resign-min-plies", 10);
   cfg.resign_probe = (float)a.dbl("resign-probe", 0.0);
   cfg.reuse_tree = (int)a.num("reuse-tree", 1) != 0;
+  cfg.opening_plies = std::max(0, (int)a.num("opening-plies", 0));
   cfg.lanes = std::max(1, (int)a.num("lanes", 1));
   if (cfg.lanes > 1 && cfg.mcts.gumbel) {
     std::fprintf(stderr, "lanes>1 with gumbel: falling back to per-game (Gumbel has own batching)\n");

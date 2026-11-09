@@ -128,6 +128,48 @@ int main() {
     }
     EXPECT(p0 == 0); EXPECT(short_games == 18);
   }
+  { // random opening: N uniform book plies advance the root, no samples emitted
+    using G = game_template::Game;
+    Rng rng(42);
+    auto s = G::initial();
+    int played = play_random_opening<G>(s, 4, rng);
+    EXPECT(played == 4);                 // 21 stones, every move takes 1..3
+    EXPECT(s.pile <= 17 && s.pile >= 9);
+    EXPECT(s.player == 0);               // 4 plies: P0 to move again
+    Rng rng2(42); auto s2 = G::initial();  // same seed -> same book
+    EXPECT(play_random_opening<G>(s2, 4, rng2) == 4);
+    EXPECT(s2.pile == s.pile && s2.player == s.player);
+    Rng rng3(42); auto s3 = G::initial();  // 0 plies = legacy no-op
+    EXPECT(play_random_opening<G>(s3, 0, rng3) == 0);
+    EXPECT(s3.pile == 21 && s3.player == 0);
+    Rng rng4(7); auto s4 = G::initial();   // over-long request stops at terminal
+    int all = play_random_opening<G>(s4, 100, rng4);
+    EXPECT(all <= G::kMaxGameLength); EXPECT(G::is_terminal(s4));
+  }
+  { // selfplay opening_plies: book plies are played before the first search and
+    // emit no samples (first target encodes a position deeper than the root).
+    using G = game_template::Game; UniformEvaluator<G> ev;
+    SelfPlayConfig cfg; cfg.simulations = 32; cfg.temperature_moves = 0;
+    cfg.enable_shortcuts = true; cfg.opening_plies = 3;
+    auto first_pile = [](const Sample<G>& sm) {
+      int at = -1;
+      for (int i = 0; i < G::kInputW; i++) if (sm.input[i] == 1.f) at = i;
+      return at;
+    };
+    Rng rng(5); auto rec = play_selfplay_game<G>(cfg, ev, rng);
+    EXPECT(!rec.samples.empty());
+    int p = first_pile(rec.samples[0]);
+    EXPECT(p <= 21 - 3 && p > 0);        // at least 3 book plies consumed
+    Rng rng2(5); auto rec2 = play_selfplay_game<G>(cfg, ev, rng2);
+    EXPECT(first_pile(rec2.samples[0]) == p);  // same seed -> same book
+    Rng rng3(5); auto lanes = play_selfplay_lanes<G>(cfg, ev, rng3, 3);
+    EXPECT(lanes.size() == 3u);
+    for (auto& r : lanes) {
+      EXPECT(!r.samples.empty());
+      int q = first_pile(r.samples[0]);
+      EXPECT(q <= 21 - 3 && q > 0);      // lanes path applies the same rule
+    }
+  }
   { // Empty-tree move accessors must return -1, not read nodes_[-1].
     // This is reachable in practice: adaptive_search with a zero max-sims budget
     // (time-sliced callers) and any play/arena loop that asks for a move before

@@ -18,6 +18,8 @@ games/<name>/ (rules) -> validate_game -> benchmark_game -> selfplay (MCTS) -> t
 - Engine: PUCT MCTS + MCTS-Solver proofs, forced playouts + policy-target pruning, playout-cap
   randomization (`full_search` flag + masked loss), win/block-in-1 shortcuts, can't-be-overtaken
   early stop, eval cache, adaptive search, TimeManager, Elo arena. 4/4 ctest + ASan/UBSan pass.
+- Data diversity: opt-in random opening plies (`selfplay --opening-plies N`, default 0) break the
+  identical-root correlation; book moves are played, not trained on (no samples).
 - Training loop closes end-to-end (selfplay → replay → train → TorchScript → NN-guided selfplay
   → arena promotion). Connect4 10-min pilots: loss 1.95 → 1.57, checkpoints improve monotonically,
   but absolute strength vs rollout baselines is unresolved (20-game CIs). Gumbel-prior-noise
