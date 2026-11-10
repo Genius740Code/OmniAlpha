@@ -154,6 +154,22 @@ def _prune_checkpoints(out_dir, keep=5):
             pass
     return len(cks)
 
+def _checkpoint_keep(cfg):
+    """Retention count for checkpoint_*.pt (0 = keep none, default 5).
+
+    Reads checkpoint.keep first, then the legacy champion.keep_last_n_checkpoints
+    that long_term.yaml already documented (it was silently ignored before). Long
+    runs should raise this: the endgame tournament can only pick from the
+    checkpoints still on disk.
+    """
+    keep = (cfg.get("checkpoint") or {}).get("keep")
+    if keep is None:
+        keep = (cfg.get("champion") or {}).get("keep_last_n_checkpoints", 5)
+    try:
+        return max(0, int(keep))
+    except (TypeError, ValueError):
+        return 5
+
 def sprt_arena_gate(build, game, cand_spec, champ_spec, ev_cfg,
                     max_games=None, deadline_s=None, minutes_per_game=None):
     """Run candidate-vs-champion arenas in batches, early-stopping on an SPRT verdict.
@@ -380,6 +396,13 @@ def main():
                     help="compressed ~2-min validation run (in-memory config override: "
                          "2 iters, 1 train step, export, 2 eval games, no gate); "
                          "requires the C++ build but never a GPU")
+    ap.add_argument("--resume", action="store_true",
+                    help="continue from <out>/train_state.pt when present: restores "
+                         "weights, optimizer, EMA, iteration and cumulative training "
+                         "clock, so the LR schedule and budget pick up where they stopped")
+    ap.add_argument("--init-from", default=None,
+                    help="load weights from this .pt before training (warm start from a "
+                         "checkpoint/champion); ignored when --resume restores state")
     a = ap.parse_args(); cfg = yaml.safe_load(open(a.config)); os.makedirs(a.out, exist_ok=True)
     dry = bool(a.dry_run)
     if dry:
@@ -396,7 +419,8 @@ def main():
     gate_reserve_s = budget * float(ev0.get("gate_share", 0.1)) if endgame_enabled else 0.0
     train_budget = budget - gate_reserve_s
     from .train import (make_trainer, save_checkpoint, export_torchscript,
-                        setup_torch_threads, cosine_lr, ema_export)
+                        setup_torch_threads, cosine_lr, ema_export,
+                        load_checkpoint, save_train_state, load_train_state)
     t0 = time.time()
     def phase(msg):
         if dry:
@@ -410,6 +434,32 @@ def main():
     shape = None
     champ_ts = None
     last_stats = None
+    state_path = os.path.join(a.out, "train_state.pt")
+    resume_state = None
+    resume_state_saved = False
+    if dry:  # a validation dry run must never inherit a real 10-hour training state
+        a.resume = False
+        a.init_from = None
+    if a.resume:
+        if not os.path.exists(state_path):
+            print(f"resume: {state_path} not found; starting fresh")
+        else:
+            try:
+                meta = load_train_state(state_path, device="cpu", load_weights=False)
+                resume_state = meta
+                it = max(0, int(meta["iter"]))
+                elapsed_prior = max(0.0, float(meta["elapsed_s"]))
+                t0 -= elapsed_prior  # cumulative clock: budget + LR phase continue
+                next_ck = ((math.floor(elapsed_prior / ck_every) + 1) * ck_every
+                           if ck_every > 0 else 0)
+                left = max(0.0, train_budget - elapsed_prior)
+                print(f"resume: iter {it}, cumulative {elapsed_prior:.0f}s, "
+                      f"{left:.0f}s of training budget left "
+                      f"(next checkpoint at {next_ck / 60:.0f} min)")
+                phase(f"resume iter {it} ({elapsed_prior:.0f}s trained)")
+            except Exception as e:
+                print(f"resume: could not read {state_path} ({e}); starting fresh")
+                resume_state = None
     while time.time() - t0 < train_budget and (dry_max_iters is None or it < dry_max_iters):
         data = os.path.join(a.out, "selfplay_tmp.bin"); sp = cfg["selfplay"]
         latest_ts = os.path.join(a.out, "latest.ts")
@@ -543,7 +593,21 @@ def main():
                 grad_clip=tr.get("grad_clip", 0.0),
                 optimizer=tr.get("optimizer", "adamw"),
                 momentum=tr.get("momentum", 0.9),
-                ema_decay=tr.get("ema_decay", 0.0))
+                ema_decay=tr.get("ema_decay", 0.0),
+                ema_init=(resume_state or {}).get("ema"))
+            train_device = next(net.parameters()).device
+            if resume_state is not None:
+                saved_shape = resume_state.get("shape")
+                if saved_shape and any(int(saved_shape.get(k, -1)) != int(shape[k])
+                                       for k in ("planes", "h", "w", "actions")):
+                    raise RuntimeError(
+                        f"resume shape mismatch: state {saved_shape} vs data {shape}; "
+                        f"use --init-from for a weights-only warm start")
+                load_train_state(state_path, net=net, opt=opt, device=train_device)
+                print(f"resume: restored model + optimizer at iter {resume_state['iter']}")
+            elif a.init_from:
+                load_checkpoint(net, a.init_from, device=train_device)
+                print(f"init-from: loaded weights from {a.init_from}")
             base_lr = tr["lr"]
             annealed = False
         # (split already done above, before augmentation)
@@ -645,6 +709,16 @@ def main():
                                os.path.join(a.out, "latest_ema.ts"))
                 except Exception as e:
                     print(f"ema export failed (continuing without it): {e}")
+        # Resume state at checkpoint cadence (plus the first iteration, so a crash
+        # before the first checkpoint is still recoverable). Optimizer moments and
+        # the cumulative clock are what make a 10-hour run resumable without a
+        # schedule discontinuity; the big replay buffer is intentionally not saved.
+        if ck_now or not resume_state_saved:
+            try:
+                save_train_state(state_path, net, opt, ema, it, el, extra=dict(shape=shape))
+            except Exception as e:
+                print(f"resume-state save failed (continuing): {e}")
+            resume_state_saved = True
         try:
             export_torchscript(net, shape, latest_ts)
         except Exception as e:
@@ -669,7 +743,13 @@ def main():
                 phase(f"checkpoint arena: {arena}")
             except Exception as e:
                 print(f"arena failed: {e}")
-    save_checkpoint(net, os.path.join(a.out, "latest.pt"))
+    if net is not None:
+        save_checkpoint(net, os.path.join(a.out, "latest.pt"))
+        try:
+            save_train_state(state_path, net, opt, ema, it, time.time() - t0,
+                             extra=dict(shape=shape))
+        except Exception as e:
+            print(f"final resume-state save failed (continuing): {e}")
     if ema is not None and shape is not None:
         try:  # fresh EMA twin for the endgame / post-hoc comparison
             ema_export(ema, net, shape,
@@ -725,8 +805,10 @@ def main():
             reason = (f"insufficient budget: {remaining_s:.0f}s left of the "
                       f"{gate_reserve_s:.0f}s gate window fits {gate_games} games "
                       f"(at {mpg:.3f} min/game)")
-            print(f"SPRT gate skipped ({reason}); publishing latest, keeping last 5 checkpoints")
-            kept = _prune_checkpoints(a.out, keep=5)
+            ck_keep = _checkpoint_keep(cfg)
+            print(f"SPRT gate skipped ({reason}); publishing latest, "
+                  f"keeping last {ck_keep} checkpoints")
+            kept = _prune_checkpoints(a.out, keep=ck_keep)
             gate = dict(decision="skipped_no_budget", reason=reason,
                         remaining_s=round(remaining_s, 1),
                         estimated_gate_cost_s=round(gate_cost_s, 1),
