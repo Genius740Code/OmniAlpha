@@ -143,11 +143,29 @@ time available → serving sims can be WORLD-CLASS: 600-1200 sims/move is afford
 - `python -m gai.orchestrator --config configs/connect4_60m_v9.yaml --game connect4 --minutes 50`
 - Every iteration exports `latest.ts` and the next iter plays with `hybrid:latest_ts` (annealed):
   the live bot improves continuously through the hour. NO restarts needed.
-- `checkpoint.interval_minutes: 5` → candidate every 5 min (last 5 kept).
+- `checkpoint.interval_minutes: 5` → candidate every 5 min (retention `checkpoint.keep`,
+  default 5; long runs should raise it).
 - Endgame: `eval.ordered true` + `roundrobin_last 5` → Bradley-Terry picks the strongest
   checkpoint automatically in the reserved gate_share window. That checkpoint(esTorchScript)
   is the one that plays the live game.
 - `--dry-run` first to rehearse the full timeline (no training side effects).
+
+## Long runs (10 h): resume + retention
+- Recipe: `configs/connect4_10h.yaml` (600 min, 10-min checkpoints kept 36, cosine LR,
+  `opening_plies: 4`, 200 sims). It is a supported recipe, not an A/B-verified result —
+  keep the 50-min jam config as fallback and measure the first long run.
+- Start: `python -m gai.orchestrator --config configs/connect4_10h.yaml --game connect4 \
+  --build build-lt --out models/c4_10h`
+- Crash/reboot: run the SAME command plus `--resume`. `<out>/train_state.pt` is written at
+  checkpoint cadence (plus the first iteration) and restores model, optimizer moments, EMA,
+  iteration and cumulative training clock, so the cosine LR phase and remaining budget
+  continue instead of restarting. A shape mismatch aborts with a clear error.
+- Replay data is intentionally not persisted (large, and refills in 1–2 iterations); the
+  weights/optimizer are what make the restart lossless-ish.
+- Warm start from any checkpoint/champion without optimizer state: `--init-from models/x.pt`.
+- Retention: `checkpoint.keep` (falls back to `champion.keep_last_n_checkpoints`, default 5)
+  controls how many `checkpoint_*.pt` survive pruning, so the endgame tournament can pick a
+  mid-run peak instead of only the final minutes.
 
 ## Game-phase serving recipe (measured basis)
 - Single champion net, argmax pick, generous max_sims (600-1200): suite shows +140-170 Elo

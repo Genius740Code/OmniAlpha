@@ -22,6 +22,10 @@ games/<name>/ (rules) -> validate_game -> benchmark_game -> selfplay (MCTS) -> t
   identical-root correlation; book moves are played, not trained on (no samples).
 - Reference opponents for honest Elo: `evaluate --evaluator-a ab:depth=D[:ms=M]` runs the
   classical alpha-beta agent (no MCTS/NN) in the arena; JSON reports agent labels.
+- Long runs: `--resume` restores weights, AdamW moments, EMA, iteration and the cumulative
+  training clock from `<out>/train_state.pt`; `--init-from PATH` warm-starts weights only.
+  10-hour recipe: `configs/connect4_10h.yaml` (cosine LR, opening diversity, retained
+  checkpoints for the endgame tournament).
 - Training loop closes end-to-end (selfplay → replay → train → TorchScript → NN-guided selfplay
   → arena promotion). Connect4 10-min pilots: loss 1.95 → 1.57, checkpoints improve monotonically,
   but absolute strength vs rollout baselines is unresolved (20-game CIs). Gumbel-prior-noise

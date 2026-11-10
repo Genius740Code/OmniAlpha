@@ -1,0 +1,52 @@
+# 10-hour long-run Connect4 config (Strat Jam scale-up).
+#
+# Base: configs/connect4_jam.yaml (50-min jam) + docs/TODO.md champions. This
+# config is a RECIPE, not an A/B-verified result: the long-run knobs below
+# (cosine LR, higher sims, opening diversity, retention) are individually
+# supported but have not been measured together over 10 hours. Treat the first
+# 10h run as the experiment; keep the jam config as the fallback.
+#
+# Why these deviations from the 50-min jam config:
+# - checkpoint 10 min, keep 36: keeps ~6 h of candidates so the endgame
+#   tournament can pick a mid-run peak, not just the final 25 min. Pruning is
+#   configurable via checkpoint.keep (used when the SPRT gate is skipped).
+# - lr_schedule cosine over the actual training window (warmup 2%, floor 5%):
+#   a fixed one-shot anneal is brittle on a 10 h horizon; cosine keeps a high
+#   LR early and lands low for the final checkpoint. LR phase survives --resume
+#   because the cumulative clock is restored from train_state.pt.
+# - simulations 200 (vs 150) and games_per_iter 96: more search per target as
+#   the net gets stronger; lanes/batch stay at the measured plateau (96/48).
+# - opening_plies 4: breaks the identical-root correlation over thousands of
+#   games. Book moves are not trained on (no samples), they only diversify.
+# - replay_capacity 500k, max_reuse_ratio 8: a long run can afford a wider
+#   window without starving steps/iter (the clamp still binds on tiny batches).
+# - eval.gate_share 0.05: 30 min reserved; roundrobin_last 12 gives the ordered
+#   endgame 12 recent candidates at 20 games/pair within that window.
+# - resume: run the same command with --resume after a crash/reboot. Weights,
+#   AdamW moments, EMA, iteration and cumulative clock come from
+#   <out>/train_state.pt (written at checkpoint cadence + first iteration).
+#   The replay buffer is intentionally not persisted; it refills in 1-2 iters.
+#
+# Serving: champion.ts / latest.ts are TorchScript and hot-reloadable by play.
+budget_minutes: 600
+checkpoint: {interval_minutes: 10, keep: 36}
+selfplay: {games_per_iter: 96, simulations: 200, evaluator: rollout, threads: 2,
+  temperature_moves: 10, dirichlet: 0, full_prob: 0.25, cheap_frac: 0.15,
+  forced: 1, prune: 1, shortcuts: 1, tactics2: 1, augment: true, value_lambda: 0.1,
+  hybrid: 1, nn_start_iter: 5, nn_anneal_iters: 40,
+  batch: 48, lanes: 96, nn_strict: 1, opening_plies: 4,
+  resign_q: -0.90, resign_min_plies: 10, resign_probe: 0.15}
+network: {type: resnet, channels: 32, blocks: 3}
+training: {lr: 0.002, weight_decay: 0.0001, batch_size: 256, steps_per_iter: 80,
+  replay_capacity: 500000, mixed_precision: false, max_reuse_ratio: 8.0,
+  value_weight: 2.0, dup_weight: 1.0, num_threads: 2,
+  lr_schedule: cosine, warmup_frac: 0.02, min_lr_frac: 0.05}
+race: {enabled: false, fraction_of_budget: 0.15, candidates: [{type: resnet, channels: 32, blocks: 3}]}
+eval: {games: 8, sims: 100,
+  sprt_elo0: 0.0, sprt_elo1: 35.0, sprt_max_games: 200, sprt_batch_games: 20,
+  gate_share: 0.05, gate_time_safety: 1.5,
+  tc_ms: 300, tc_a: null, tc_b: null,
+  ordered: true, roundrobin_last: 12, roundrobin_games: 20}
+clock: {minimum_think_ms: 0, maximum_think_ms: 30000, safety_margin_ms: 100, emergency_ms: 1000}
+search: {min_simulations: 200, target_simulations: 200, max_simulations: 200}
+logging: {dir: logs, format: jsonl}
