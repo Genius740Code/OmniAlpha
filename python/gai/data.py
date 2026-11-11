@@ -1,4 +1,5 @@
 """Reader for engine/selfplay/selfplay.hpp sample files (v2, v3, v4)."""
+import os
 import numpy as np, struct
 
 def read_samples(path):
@@ -226,3 +227,53 @@ class ReplayBuffer:
             else:  # buffer holds a single entry
                 idx[k_new:] = (self.pos - 1) % self.cap
         return self.x[idx], self.pi[idx], self.z[idx], self.full[idx]
+
+    def _chronological_indices(self):
+        """Ring slots oldest -> newest (only the `n` active entries)."""
+        return (np.arange(self.n) + self.pos - self.n) % self.cap
+
+    def save(self, path):
+        """Atomically persist the active samples in chronological order.
+
+        Only the `n` live slots are written, not the full capacity, and the ring
+        is rotated oldest-first. load() re-adds through add(), which rebuilds the
+        duplicate bookkeeping and recency order exactly; this also lets a later
+        run load into a buffer with a different capacity (newest samples win).
+        The .npz is uncompressed because replay data is float-heavy and does not
+        compress well, while checkpoint-cadence writes must stay cheap.
+        """
+        idx = self._chronological_indices()
+        tmp = f"{path}.tmp.{os.getpid()}.npz"
+        np.savez(tmp, x=self.x[idx], pi=self.pi[idx], z=self.z[idx],
+                 full=self.full[idx])
+        os.replace(tmp, path)
+        return int(self.n)
+
+    def load(self, path):
+        """Append a save() file to this buffer. Returns the number of samples read.
+
+        Appending is intentional: the orchestrator loads into a freshly created
+        buffer, but tests and post-hoc tools can add an archive to existing data.
+        Shape/capacity errors are loud instead of silently training on garbage.
+        """
+        with np.load(path, allow_pickle=False) as d:
+            x = np.asarray(d["x"]); pi = np.asarray(d["pi"])
+            z = np.asarray(d["z"])
+            full = (np.asarray(d["full"]) if "full" in d.files
+                    else np.ones(len(z), np.float32))
+        if x.ndim != 4 or x.shape[1:] != self.x.shape[1:]:
+            raise ValueError(f"replay x shape {x.shape} does not match buffer "
+                             f"{(self.cap,) + self.x.shape[1:]}")
+        if pi.ndim != 2 or pi.shape[1] != self.pi.shape[1]:
+            raise ValueError(f"replay pi shape {pi.shape} does not match buffer "
+                             f"actions={self.pi.shape[1]}")
+        if z.ndim != 1 or len(z) != len(x) or len(pi) != len(x):
+            raise ValueError(f"replay row counts differ: x={len(x)} pi={len(pi)} "
+                             f"z={z.shape}")
+        if full.ndim != 1 or len(full) != len(x):
+            raise ValueError(f"replay full shape {full.shape} does not match "
+                             f"{len(x)} rows")
+        if len(z):
+            self.add(x, pi, z, full)
+        return int(len(z))
+

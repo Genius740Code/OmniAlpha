@@ -160,8 +160,10 @@ time available → serving sims can be WORLD-CLASS: 600-1200 sims/move is afford
   checkpoint cadence (plus the first iteration) and restores model, optimizer moments, EMA,
   iteration and cumulative training clock, so the cosine LR phase and remaining budget
   continue instead of restarting. A shape mismatch aborts with a clear error.
-- Replay data is intentionally not persisted (large, and refills in 1–2 iterations); the
-  weights/optimizer are what make the restart lossless-ish.
+- Replay persistence is opt-in via `training.resume_replay: true`: `<out>/replay.npz` is
+  written at checkpoint cadence (active rows, oldest-first) and loaded on `--resume`, so the
+  replay window survives a crash. It is ~50–200 MB at the 10 h capacity, so disable it on a
+  slow disk; the net resumes either way and the buffer refills in 1–2 iterations.
 - Warm start from any checkpoint/champion without optimizer state: `--init-from models/x.pt`.
 - Retention: `checkpoint.keep` (falls back to `champion.keep_last_n_checkpoints`, default 5)
   controls how many `checkpoint_*.pt` survive pruning, so the endgame tournament can pick a

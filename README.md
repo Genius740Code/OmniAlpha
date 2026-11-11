@@ -25,7 +25,7 @@ games/<name>/ (rules) -> validate_game -> benchmark_game -> selfplay (MCTS) -> t
 - Long runs: `--resume` restores weights, AdamW moments, EMA, iteration and the cumulative
   training clock from `<out>/train_state.pt`; `--init-from PATH` warm-starts weights only.
   10-hour recipe: `configs/connect4_10h.yaml` (cosine LR, opening diversity, retained
-  checkpoints for the endgame tournament).
+  checkpoints, opt-in `resume_replay` for `replay.npz`).
 - Training loop closes end-to-end (selfplay → replay → train → TorchScript → NN-guided selfplay
   → arena promotion). Connect4 10-min pilots: loss 1.95 → 1.57, checkpoints improve monotonically,
   but absolute strength vs rollout baselines is unresolved (20-game CIs). Gumbel-prior-noise

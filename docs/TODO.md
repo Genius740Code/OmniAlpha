@@ -15,6 +15,8 @@ Rule: one change at a time behind flags; A/B at equal wall-clock; kill on SPRT f
   from `train_state.pt`; `--init-from` warm-starts weights only
 - Configurable checkpoint retention (`checkpoint.keep`, legacy
   `champion.keep_last_n_checkpoints`); 10-hour recipe `configs/connect4_10h.yaml`
+- Long-run replay persistence: `training.resume_replay` saves `replay.npz` at checkpoint
+  cadence and reloads it on `--resume` (duplicate/recency state rebuilt through `add()`)
 - Test suite: masked-policy-loss test pinned to CPU so CUDA hosts stop reporting
   a device-dependent false failure
 - MCTS-Solver proof propagation; forced playouts + policy-target pruning

@@ -25,7 +25,9 @@
 # - resume: run the same command with --resume after a crash/reboot. Weights,
 #   AdamW moments, EMA, iteration and cumulative clock come from
 #   <out>/train_state.pt (written at checkpoint cadence + first iteration).
-#   The replay buffer is intentionally not persisted; it refills in 1-2 iters.
+#   training.resume_replay true also persists replay.npz at checkpoint cadence;
+#   it is ~50-200 MB for this capacity, so disable it on a slow disk (the net
+#   resumes either way and the buffer refills in 1-2 iters).
 #
 # Serving: champion.ts / latest.ts are TorchScript and hot-reloadable by play.
 budget_minutes: 600
@@ -39,7 +41,7 @@ selfplay: {games_per_iter: 96, simulations: 200, evaluator: rollout, threads: 2,
 network: {type: resnet, channels: 32, blocks: 3}
 training: {lr: 0.002, weight_decay: 0.0001, batch_size: 256, steps_per_iter: 80,
   replay_capacity: 500000, mixed_precision: false, max_reuse_ratio: 8.0,
-  value_weight: 2.0, dup_weight: 1.0, num_threads: 2,
+  value_weight: 2.0, dup_weight: 1.0, num_threads: 2, resume_replay: true,
   lr_schedule: cosine, warmup_frac: 0.02, min_lr_frac: 0.05}
 race: {enabled: false, fraction_of_budget: 0.15, candidates: [{type: resnet, channels: 32, blocks: 3}]}
 eval: {games: 8, sims: 100,

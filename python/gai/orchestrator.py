@@ -435,6 +435,8 @@ def main():
     champ_ts = None
     last_stats = None
     state_path = os.path.join(a.out, "train_state.pt")
+    replay_path = os.path.join(a.out, "replay.npz")
+    resume_replay = bool((cfg.get("training") or {}).get("resume_replay", False))
     resume_state = None
     resume_state_saved = False
     if dry:  # a validation dry run must never inherit a real 10-hour training state
@@ -605,6 +607,14 @@ def main():
                         f"use --init-from for a weights-only warm start")
                 load_train_state(state_path, net=net, opt=opt, device=train_device)
                 print(f"resume: restored model + optimizer at iter {resume_state['iter']}")
+                if resume_replay and os.path.exists(replay_path):
+                    try:
+                        n_replay = buf.load(replay_path)
+                        print(f"resume: restored {n_replay} replay samples from {replay_path}")
+                    except Exception as e:
+                        print(f"resume: replay load failed ({e}); buffer stays empty")
+                elif resume_replay:
+                    print(f"resume: no {replay_path}; starting with an empty replay buffer")
             elif a.init_from:
                 load_checkpoint(net, a.init_from, device=train_device)
                 print(f"init-from: loaded weights from {a.init_from}")
@@ -712,12 +722,17 @@ def main():
         # Resume state at checkpoint cadence (plus the first iteration, so a crash
         # before the first checkpoint is still recoverable). Optimizer moments and
         # the cumulative clock are what make a 10-hour run resumable without a
-        # schedule discontinuity; the big replay buffer is intentionally not saved.
+        # schedule discontinuity; replay is opt-in because it is much larger.
         if ck_now or not resume_state_saved:
             try:
                 save_train_state(state_path, net, opt, ema, it, el, extra=dict(shape=shape))
             except Exception as e:
                 print(f"resume-state save failed (continuing): {e}")
+            if resume_replay:
+                try:
+                    buf.save(replay_path)
+                except Exception as e:
+                    print(f"replay save failed (continuing): {e}")
             resume_state_saved = True
         try:
             export_torchscript(net, shape, latest_ts)
@@ -750,6 +765,11 @@ def main():
                              extra=dict(shape=shape))
         except Exception as e:
             print(f"final resume-state save failed (continuing): {e}")
+        if resume_replay and buf is not None:
+            try:
+                buf.save(replay_path)
+            except Exception as e:
+                print(f"final replay save failed (continuing): {e}")
     if ema is not None and shape is not None:
         try:  # fresh EMA twin for the endgame / post-hoc comparison
             ema_export(ema, net, shape,
