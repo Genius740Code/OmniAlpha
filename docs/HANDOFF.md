@@ -164,6 +164,9 @@ time available → serving sims can be WORLD-CLASS: 600-1200 sims/move is afford
   written at checkpoint cadence (active rows, oldest-first) and loaded on `--resume`, so the
   replay window survives a crash. It is ~50–200 MB at the 10 h capacity, so disable it on a
   slow disk; the net resumes either way and the buffer refills in 1–2 iterations.
+- The EMA twin can be a finalist: `eval.include_ema: true` appends `latest_ema.ts` to the
+  ordered tournament between latest and champion (champion still wins exact Elo ties), so a
+  10 h run can promote the averaged weights when they are stronger.
 - Warm start from any checkpoint/champion without optimizer state: `--init-from models/x.pt`.
 - Retention: `checkpoint.keep` (falls back to `champion.keep_last_n_checkpoints`, default 5)
   controls how many `checkpoint_*.pt` survive pruning, so the endgame tournament can pick a

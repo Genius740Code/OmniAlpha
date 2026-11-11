@@ -224,6 +224,38 @@ def sprt_arena_gate(build, game, cand_spec, champ_spec, ev_cfg,
                      elo0=elo0, elo1=elo1, alpha=alpha, beta=beta,
                      budget_aborted=aborted)
 
+def _endgame_candidates(out_dir, n_last, include_ema=False):
+    """Candidate list for the ordered endgame, in tie-break order (oldest first).
+
+    The last `n_last - 1` checkpoints are complemented by latest, optionally the
+    EMA twin, and the incumbent champion last. Keeping champion last means an
+    equal-BT-Elo tie still favours the incumbent (existing behaviour); the EMA
+    slot sits just before it so a tie can promote EMA over latest but never over
+    a sitting champion. Only existing .pt files become candidates; missing .ts
+    copies are exported later by the tournament.
+    """
+    n_last = max(2, int(n_last))
+    latest_pt = os.path.join(out_dir, "latest.pt")
+    ema_pt = os.path.join(out_dir, "latest_ema.pt")
+    champ_ts = os.path.join(out_dir, "champion.ts")
+    champ_pt = os.path.join(out_dir, "champion.pt")
+    cks = []
+    for p in glob.glob(os.path.join(out_dir, "checkpoint_*.pt")):
+        m = re.search(r"checkpoint_(\d+)m\.pt$", os.path.basename(p))
+        cks.append(((int(m.group(1)) if m else 0), os.path.getmtime(p), p))
+    cks.sort()
+    cands = []
+    for _, _, p in cks[-(n_last - 1):]:
+        stem = os.path.splitext(os.path.basename(p))[0]
+        cands.append((stem, os.path.join(out_dir, f"rr_{stem}.ts"), p))
+    if os.path.exists(latest_pt):
+        cands.append(("latest", os.path.join(out_dir, "latest.ts"), latest_pt))
+    if include_ema and os.path.exists(ema_pt):
+        cands.append(("ema", os.path.join(out_dir, "latest_ema.ts"), ema_pt))
+    if os.path.exists(champ_ts):
+        cands.append(("champion", champ_ts, champ_pt))
+    return cands
+
 def run_endgame_tournament(build, game, cfg, out_dir, shape, ev_cfg,
                            deadline_s=None, minutes_per_game=None, phase=None):
     """Round-robin the final checkpoints (plus the incumbent champion) at equal time
@@ -245,21 +277,9 @@ def run_endgame_tournament(build, game, cfg, out_dir, shape, ev_cfg,
     from .model import build as build_net
     from .train import load_checkpoint, export_torchscript
     n_last = max(2, int(ev_cfg.get("roundrobin_last", 5)))
-    latest_pt = os.path.join(out_dir, "latest.pt"); latest_ts = os.path.join(out_dir, "latest.ts")
-    champ_pt = os.path.join(out_dir, "champion.pt"); champ_ts = os.path.join(out_dir, "champion.ts")
-    cks = []
-    for p in glob.glob(os.path.join(out_dir, "checkpoint_*.pt")):
-        m = re.search(r"checkpoint_(\d+)m\.pt$", os.path.basename(p))
-        cks.append(((int(m.group(1)) if m else 0), os.path.getmtime(p), p))
-    cks.sort()
-    cands = []
-    for _, _, p in cks[-(n_last - 1):]:
-        stem = os.path.splitext(os.path.basename(p))[0]
-        cands.append((stem, os.path.join(out_dir, f"rr_{stem}.ts"), p))
-    if os.path.exists(latest_pt):
-        cands.append(("latest", latest_ts, latest_pt))
-    if os.path.exists(champ_ts):
-        cands.append(("champion", champ_ts, champ_pt))
+    include_ema = (bool(ev_cfg.get("include_ema", False))
+                   and float(cfg.get("training", {}).get("ema_decay", 0.0) or 0.0) > 0.0)
+    cands = _endgame_candidates(out_dir, n_last, include_ema=include_ema)
     if len(cands) < 2:
         print(f"endgame tournament skipped: {len(cands)} candidate(s), need >= 2")
         return None
@@ -722,7 +742,7 @@ def main():
         # Resume state at checkpoint cadence (plus the first iteration, so a crash
         # before the first checkpoint is still recoverable). Optimizer moments and
         # the cumulative clock are what make a 10-hour run resumable without a
-        # schedule discontinuity; replay is opt-in because it is much larger.
+        # schedule discontinuity; the big replay buffer is intentionally not saved.
         if ck_now or not resume_state_saved:
             try:
                 save_train_state(state_path, net, opt, ema, it, el, extra=dict(shape=shape))
